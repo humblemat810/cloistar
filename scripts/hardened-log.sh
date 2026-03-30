@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-docker compose -f docker-compose.hardened.yml logs -f openclaw bridge
+docker compose -f docker-compose.hardened.yml logs -f openclaw-gateway bridge

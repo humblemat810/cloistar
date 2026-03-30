@@ -1,7 +1,9 @@
 services:
   bridge:
+    image: kogwistar-bridge:local
     build:
       context: ./bridge
+      dockerfile: Dockerfile
     container_name: kogwistar-openclaw-bridge
     ports:
       - "8788:8788"
@@ -9,25 +11,84 @@ services:
       - .env
     restart: unless-stopped
 
-  openclaw:
-    build:
-      context: ./openclaw-container
-      dockerfile: Dockerfile
-    container_name: kogwistar-openclaw
+  openclaw-gateway:
+    image: kogwistar-openclaw:local
+    container_name: kogwistar-openclaw-gateway
     depends_on:
       - bridge
+    env_file:
+      - .env
     ports:
-      - "18789:18789"
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
     environment:
-      NODE_ENV: production
-    read_only: true
-    tmpfs:
-      - /tmp
-      - /home/claw/.openclaw/tmp
+      HOME: /home/node
+      TERM: xterm-256color
+      TZ: ${OPENCLAW_TZ:-UTC}
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
+    volumes:
+      - ${OPENCLAW_CONFIG_DIR:-./.docker/openclaw-config}:/home/node/.openclaw
+      - ${OPENCLAW_WORKSPACE_DIR:-./.docker/openclaw-workspace}:/home/node/.openclaw/workspace
+      - ./:/workspace/scaffold:ro
+    init: true
     security_opt:
       - no-new-privileges:true
-    cap_drop:
-      - ALL
     restart: unless-stopped
+    command:
+      [
+        "node",
+        "dist/index.js",
+        "gateway",
+        "--bind",
+        "${OPENCLAW_GATEWAY_BIND:-lan}",
+        "--port",
+        "18789",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
-# docker compose -f docker-compose.hardened.yml up --build
+  openclaw-cli:
+    image: kogwistar-openclaw:local
+    depends_on:
+      - openclaw-gateway
+    network_mode: "service:openclaw-gateway"
+    env_file:
+      - .env
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      BROWSER: echo
+      TZ: ${OPENCLAW_TZ:-UTC}
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
+    volumes:
+      - ${OPENCLAW_CONFIG_DIR:-./.docker/openclaw-config}:/home/node/.openclaw
+      - ${OPENCLAW_WORKSPACE_DIR:-./.docker/openclaw-workspace}:/home/node/.openclaw/workspace
+      - ./:/workspace/scaffold:ro
+    stdin_open: true
+    tty: true
+    init: true
+    entrypoint: ["node", "dist/index.js"]
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+
+# Build images first:
+#   DOCKER_BUILDKIT=1 docker build -t kogwistar-openclaw:local -f openclaw/Dockerfile --build-arg OPENCLAW_INSTALL_DOCKER_CLI=1 ./openclaw
+#   DOCKER_BUILDKIT=1 docker build -t openclaw-sandbox:bookworm-slim -f openclaw/Dockerfile.sandbox ./openclaw
+#   docker compose -f docker-compose.hardened.yml build bridge
+# Then start:
+#   docker compose -f docker-compose.hardened.yml up -d
