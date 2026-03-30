@@ -1,0 +1,19 @@
+{
+  "name": "@kogwistar/openclaw-governance",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Thin OpenClaw governance plugin that delegates to a Kogwistar bridge",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "dev": "tsc -w -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@sinclair/typebox": "^0.34.0",
+    "typescript": "^5.7.0"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.28"
+  }
+}

@@ -1,0 +1,12 @@
+services:
+  bridge:
+    build:
+      context: ./bridge
+    container_name: kogwistar-openclaw-bridge
+    ports:
+      - "8788:8788"
+    env_file:
+      - .env
+    restart: unless-stopped
+
+# docker compose -f docker-compose.dev.yml up --build

@@ -1,0 +1,38 @@
+{
+  // Example OpenClaw config fragment for local development.
+  // Merge this into ~/.openclaw/openclaw.json and replace placeholders.
+
+  agents: {
+    defaults: {
+      workspace: "~/.openclaw/workspace",
+    },
+  },
+
+  plugins: {
+    enabled: true,
+
+    // Option A: direct local path load during development
+    load: {
+      paths: [
+        "/ABSOLUTE/PATH/TO/kogwistar-openclaw-governance-scaffold/plugin"
+      ],
+    },
+
+    entries: {
+      "kogwistar-governance": {
+        enabled: true,
+        config: {
+          bridgeUrl: "http://127.0.0.1:8788",
+          requestTimeoutMs: 3000,
+          defaultSeverity: "warning",
+          logPayloads: true,
+        },
+      },
+    },
+  },
+
+  // Optional command exposure if you want chat-native plugin inspection
+  commands: {
+    plugins: true,
+  },
+}
