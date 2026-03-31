@@ -20,6 +20,94 @@ Make the current dev integration behave like a real governance boundary:
 - `scripts/install-plugin-host.sh` registers the local plugin into the checked-out OpenClaw host.
 - `dev-debug-cycle.md` describes the current dev loop.
 
+## Kogwistar-Native Direction
+
+The preferred next step is not to build a separate governance loop from scratch inside the bridge.
+
+Instead, the bridge should host Kogwistar natively:
+
+- import `kogwistar.engine_core.engine.GraphKnowledgeEngine` directly
+- avoid the Kogwistar MCP server for this integration path
+- construct a `WorkflowRuntime`
+- use a `MappingStepResolver` or a dedicated governance resolver pack
+- inject dependencies through `initial_state["_deps"]`
+- persist workflow design, execution trace, and graph mutations through the engine
+
+This follows the way Kogwistar already structures runtime execution today:
+
+- workflow nodes and edges live in the workflow graph
+- step handlers are registered on a resolver registry
+- handlers return `RunSuccess`, `RunFailure`, or `RunSuspended`
+- the runtime persists checkpoints and execution traces while executing the workflow design
+- resolvers build or mutate graph state by calling engine add-node / add-edge paths through injected services
+
+For this use case, the governing workflow should be modeled as a conversation or workflow between:
+
+- the OpenClaw agent side
+- the governor side
+
+OpenClaw is the external actor proposing a tool action. Kogwistar is the governor that evaluates the proposal, records it, and either:
+
+- allows it
+- blocks it
+- suspends for approval and resumes later
+
+That means the bridge can stay thin:
+
+- receive the OpenClaw hook payload
+- materialize or route it into a Kogwistar workflow run
+- let the resolver/workflow decide what graph nodes and edges to create
+- map the workflow outcome back into the bridge response contract
+
+## Proposed Governance Workflow Shape
+
+The governance loop should look like a native Kogwistar workflow, not a hand-coded polling loop.
+
+Suggested flow:
+
+1. A bridge endpoint receives `before_tool_call`.
+2. The bridge creates or reuses a Kogwistar workflow design for governance.
+3. The bridge starts a `WorkflowRuntime` run with injected dependencies in `_deps`.
+4. Resolver steps:
+   - ingest the OpenClaw proposal as graph state
+   - append governance/event nodes and edges
+   - inspect prior approvals, policies, and history
+   - decide `allow`, `block`, or `suspend for approval`
+5. The workflow returns:
+   - `RunSuccess` mapped to `allow` or `block`
+   - `RunSuspended` mapped to `requireApproval`
+6. The bridge returns the mapped decision to the plugin.
+7. Approval resolution re-enters the workflow as another event and resumes or closes the governance run.
+
+This uses Kogwistar the way its runtime tutorials and conversation workflows already work:
+
+- resolver registration for named ops
+- workflow design as persisted graph artifacts
+- `_deps` as dependency injection
+- `StepContext.events` and trace persistence for observability
+- explicit suspend/resume instead of bespoke approval bookkeeping
+
+## Design Implications
+
+This changes the target architecture in a useful way:
+
+- the bridge is primarily an HTTP adapter plus Kogwistar host
+- governance policy lives in workflow design and resolvers
+- approvals become runtime suspension and resume events
+- graph persistence and traceability come from Kogwistar runtime and engine paths
+- future CDC/replay should build on Kogwistar traces and projections, not a separate custom governance store
+
+## What Still Needs Definition
+
+Even with this direction clarified, these pieces still need to be designed explicitly:
+
+- the governance workflow design itself
+- the resolver pack for governance-specific ops
+- the graph schema for OpenClaw proposal, decision, approval, and completion events
+- how approval resume keys map back to workflow runs
+- whether governance lives in the conversation graph, workflow trace graph, or a dedicated graph namespace
+- how bridge endpoints map workflow outcomes back into the exact OpenClaw response contract
+
 ## Roadmap
 
 ### Phase 1: Bridge observability
@@ -60,28 +148,25 @@ Acceptance criteria:
 - A bridge `requireApproval` pauses the action until approval is resolved.
 - A bridge `allow` does not add extra friction.
 
-### Phase 3: Kogwistar decider
+### Phase 3: Kogwistar-native governance runtime
 
-Turn the bridge into a real policy engine instead of just a pass-through.
+Replace the hard-coded bridge decider with a Kogwistar-hosted workflow runtime.
 
-Define the decision contract in one place:
+Implement:
 
-- input: plugin id, tool name, params, session metadata, raw event
-- output: `allow`, `block`, or `requireApproval`
-
-Start with simple rules:
-
-- allowlist rules
-- block rules
-- approval thresholds
-
-Later, evolve toward richer policy evaluation and durable storage.
+- direct bridge-side import of `GraphKnowledgeEngine`
+- runtime construction without MCP server dependency
+- a governance workflow design
+- a governance resolver registry
+- injected dependencies through `_deps`
+- workflow outcomes mapped back into `allow`, `block`, or `requireApproval`
 
 Acceptance criteria:
 
-- The bridge decision is deterministic for the same input.
-- The bridge can explain why a decision was made.
-- Approval requests carry enough metadata to resolve back to the original request.
+- The bridge can execute a governance workflow run for a tool proposal.
+- The decision comes from resolver/workflow execution, not only a hard-coded `decide(...)`.
+- Approval can be represented as workflow suspension and later resolution.
+- The bridge can explain which workflow step or graph state produced the decision.
 
 ### Phase 4: Contract alignment
 
@@ -174,27 +259,33 @@ Acceptance criteria:
 - Dev transport is explicit and local.
 - The bridge rejects unexpected caller shapes if needed.
 
-### Phase 9: Durable backend later
+### Phase 9: CDC persistence and replay
 
-Keep durable Kogwistar storage and projections as a later milestone.
+Build durable persistence on top of Kogwistar's trace and graph model rather than a separate bridge-local event store.
 
-Do not let the current dev path imply that persistence is already complete.
+Target:
+
+- persist proposal, decision, approval, and completion events as graph artifacts or trace-linked projections
+- support replay and projection rebuild
+- keep provenance between OpenClaw request, governance workflow run, and final decision
 
 Acceptance criteria:
 
-- The current dev flow stays in-memory and simple.
-- Durable storage is documented as future work, not assumed behavior.
+- Governance events survive process restart once durable backend wiring is enabled.
+- Approval and decision history can be replayed or queried from persisted state.
+- CDC/replay uses Kogwistar-native artifacts rather than a custom duplicate log.
 
 ## Recommended Order
 
 1. Contract alignment
 2. Bridge observability
-3. Plugin enforcement
-4. Tests
-5. Failure handling
-6. Traceability
-7. Security and payload hygiene
-8. Durable backend later
+3. Kogwistar-native governance runtime
+4. Plugin enforcement
+5. Tests
+6. Failure handling
+7. Traceability
+8. Security and payload hygiene
+9. CDC persistence and replay
 
 ## Definition of Done for Dev Seam
 
@@ -207,4 +298,3 @@ We can say the seam is correct when all of these are true:
 - Approval resolution flows back through the bridge.
 - Bridge logs and `/debug/state` make the flow easy to inspect.
 - The dev runbook explains how to reproduce the loop from scratch.
-
