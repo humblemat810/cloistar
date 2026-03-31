@@ -51,5 +51,10 @@ class InMemoryStore:
                 "approvals": dict(self.approvals),
             }
 
+    def reset(self) -> None:
+        with self._lock:
+            self.events.clear()
+            self.approvals.clear()
+
 
 store = InMemoryStore()

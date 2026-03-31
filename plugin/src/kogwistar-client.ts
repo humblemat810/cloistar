@@ -1,34 +1,9 @@
 import type { PluginLogger } from "openclaw/plugin-sdk/plugin-entry";
-
-export type GovernanceDecision =
-  | { decision: "allow"; annotations?: Record<string, unknown> }
-  | { decision: "block"; reason: string }
-  | {
-      decision: "requireApproval";
-      title: string;
-      description: string;
-      severity?: "info" | "warning" | "critical";
-      timeoutMs?: number;
-      timeoutBehavior?: "allow" | "deny";
-      approvalId?: string;
-    };
-
-export type BeforeToolCallPayload = {
-  pluginId: string;
-  sessionId?: string | null;
-  toolName?: string | null;
-  params?: unknown;
-  rawEvent: unknown;
-};
-
-export type AfterToolCallPayload = {
-  pluginId: string;
-  sessionId?: string | null;
-  toolName?: string | null;
-  params?: unknown;
-  result?: unknown;
-  rawEvent: unknown;
-};
+import type {
+  AfterToolCallPayload,
+  BeforeToolCallPayload,
+  GovernanceDecision,
+} from "./governance-contract.js";
 
 type ClientOptions = {
   bridgeUrl: string;
