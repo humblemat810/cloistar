@@ -9,6 +9,26 @@ The intent is to keep OpenClaw focused on execution while Kogwistar owns:
 - approval state
 - durable audit and projection
 
+## Start Here
+
+- [Architecture](./architecture.md) - current dev topology and integration seam
+- [Dev Debug Cycle](./dev-debug-cycle.md) - the host/plugin/bridge iteration loop
+- [ARD](./ARD.md) - roadmap for correctness, observability, tests, and hardening
+- [OpenClaw plugin manifest](./plugin/openclaw.plugin.json) - native plugin metadata
+- [OpenClaw plugin entry](./plugin/src/index.ts) - hook wiring and governance calls
+- [Bridge entrypoint](./bridge/app/main.py) - FastAPI governance endpoints and debug state
+
+## Action Quick Lookup
+
+| If you want to... | Look here | What to check |
+| --- | --- | --- |
+| Block a dangerous tool call | [`bridge/app/policy.py`](./bridge/app/policy.py) and [`plugin/src/index.ts`](./plugin/src/index.ts) | The bridge must return `block`, and the plugin must translate that into `block: true` during `before_tool_call`. |
+| Require approval before a tool runs | [`bridge/app/policy.py`](./bridge/app/policy.py) and [`plugin/src/index.ts`](./plugin/src/index.ts) | The bridge must return `requireApproval`, and the plugin must return the OpenClaw approval object with an `onResolution` callback. |
+| Trace what the plugin sent | [`plugin/src/kogwistar-client.ts`](./plugin/src/kogwistar-client.ts) | Check the payload posted to `/policy/before-tool-call`, `/events/after-tool-call`, or `/approval/resolution`. |
+| Trace what the bridge decided | [`bridge/app/main.py`](./bridge/app/main.py) | Check the returned decision and `/debug/state`. |
+| Register or re-register the plugin | [`scripts/install-plugin-host.sh`](./scripts/install-plugin-host.sh) | Make sure the local OpenClaw checkout is valid and the plugin id is enabled. |
+| Rebuild the plugin | [`plugin/package.json`](./plugin/package.json) and [`plugin/tsconfig.json`](./plugin/tsconfig.json) | Run `npm install` then `npm run build` so `plugin/dist/index.js` is regenerated. |
+
 ## Layout
 
 ```text
