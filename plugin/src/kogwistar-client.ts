@@ -1,3 +1,5 @@
+import type { PluginLogger } from "openclaw/plugin-sdk/plugin-entry";
+
 export type GovernanceDecision =
   | { decision: "allow"; annotations?: Record<string, unknown> }
   | { decision: "block"; reason: string }
@@ -32,12 +34,7 @@ type ClientOptions = {
   bridgeUrl: string;
   timeoutMs: number;
   logPayloads?: boolean;
-  logger?: {
-    debug?: (...args: unknown[]) => void;
-    info?: (...args: unknown[]) => void;
-    warn?: (...args: unknown[]) => void;
-    error?: (...args: unknown[]) => void;
-  };
+  logger?: PluginLogger;
 };
 
 export class KogwistarBridgeClient {
@@ -55,7 +52,7 @@ export class KogwistarBridgeClient {
 
   private async postJson<T>(path: string, payload: unknown): Promise<T> {
     if (this.logPayloads) {
-      this.logger?.debug?.("[kogwistar] POST", path, payload);
+      this.logger?.debug?.(`[kogwistar] POST ${path} ${JSON.stringify(payload)}`);
     }
 
     const controller = new AbortController();

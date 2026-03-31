@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Thin OpenClaw governance plugin that delegates to a Kogwistar bridge",
+  "openclaw": {
+    "extensions": ["./dist/index.js"]
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist",

@@ -1,6 +1,6 @@
-import { Type } from "@sinclair/typebox";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { KogwistarBridgeClient } from "./kogwistar-client.js";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 
 type PluginConfig = {
   bridgeUrl: string;
@@ -25,19 +25,34 @@ export default definePluginEntry({
   id: "kogwistar-governance",
   name: "Kogwistar Governance",
   description: "Delegates OpenClaw tool governance decisions to a Kogwistar bridge",
-  configSchema: Type.Object({
-    bridgeUrl: Type.String({ default: "http://127.0.0.1:8788" }),
-    requestTimeoutMs: Type.Optional(Type.Number({ default: 3000 })),
-    defaultSeverity: Type.Optional(
-      Type.Union([
-        Type.Literal("info"),
-        Type.Literal("warning"),
-        Type.Literal("critical"),
-      ])
-    ),
-    logPayloads: Type.Optional(Type.Boolean({ default: false })),
-  }),
-  register(api) {
+  configSchema: {
+    jsonSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        bridgeUrl: {
+          type: "string",
+          default: "http://127.0.0.1:8788",
+        },
+        requestTimeoutMs: {
+          type: "number",
+          default: 3000,
+        },
+        defaultSeverity: {
+          anyOf: [
+            { type: "string", const: "info" },
+            { type: "string", const: "warning" },
+            { type: "string", const: "critical" },
+          ],
+        },
+        logPayloads: {
+          type: "boolean",
+          default: false,
+        },
+      },
+    },
+  },
+  register(api: OpenClawPluginApi) {
     const cfg = (api.pluginConfig ?? {}) as PluginConfig;
     const client = new KogwistarBridgeClient({
       bridgeUrl: cfg.bridgeUrl ?? "http://127.0.0.1:8788",

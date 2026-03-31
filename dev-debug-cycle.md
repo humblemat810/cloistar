@@ -3,11 +3,21 @@
 This repo's development loop has three moving parts:
 
 - OpenClaw runs on the host
+- the host CLI comes from the checked-out `openclaw/` source tree via `pnpm openclaw`
 - the `kogwistar-governance` plugin is built locally and loaded from the local `plugin/` path
 - the FastAPI bridge runs in Docker via `docker-compose.dev.yml`
-- the host must already have the `openclaw` CLI on `PATH`, or you must set `OPENCLAW_BIN`
 
 The plugin is the integration seam. OpenClaw emits hook events, the plugin turns them into HTTP calls, and the bridge returns the governance decision.
+
+## Assumed Structure
+
+This runbook assumes the workspace looks like this:
+
+- `./openclaw/` is a checked-out OpenClaw source tree used to provide the host CLI with `pnpm openclaw`
+- `./plugin/` is the governance plugin you build locally
+- `./bridge/` is the Dockerized FastAPI bridge
+- `./docker-compose.dev.yml` starts the bridge only
+- `./scripts/install-plugin-host.sh` registers the local plugin with the repo-local OpenClaw CLI entrypoint
 
 ## Quick Loop
 
@@ -17,11 +27,8 @@ The plugin is the integration seam. OpenClaw emits hook events, the plugin turns
 cd openclaw
 pnpm install
 pnpm openclaw setup
-cd ..
-openclaw --version
+pnpm openclaw --version
 ```
-
-If you already have a working host install, you can skip this step and just verify `openclaw --version`.
 
 2. Start the bridge container.
 
@@ -33,6 +40,7 @@ If you already have a working host install, you can skip this step and just veri
 
 ```bash
 cd plugin
+npm install
 npm run build
 ```
 
@@ -81,7 +89,7 @@ docker compose -f docker-compose.dev.yml logs -f bridge
 ### OpenClaw host layer
 
 - Confirm the local plugin path in `configs/openclaw/openclaw.json5`
-- Confirm `openclaw` is installed on the host, or set `OPENCLAW_BIN` to the binary path
+- Run the source checkout's CLI commands from `openclaw/`; the installer helper uses `node openclaw.mjs ...` for speed
 - Restart the gateway after any plugin or config change
 - If OpenClaw is calling the plugin but not the bridge, the problem is usually in the plugin payload or the bridge URL in the OpenClaw config
 
