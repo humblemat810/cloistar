@@ -5,37 +5,50 @@ This repo's development loop has three moving parts:
 - OpenClaw runs on the host
 - the `kogwistar-governance` plugin is built locally and loaded from the local `plugin/` path
 - the FastAPI bridge runs in Docker via `docker-compose.dev.yml`
+- the host must already have the `openclaw` CLI on `PATH`, or you must set `OPENCLAW_BIN`
 
 The plugin is the integration seam. OpenClaw emits hook events, the plugin turns them into HTTP calls, and the bridge returns the governance decision.
 
 ## Quick Loop
 
-1. Start the bridge container.
+1. Set up OpenClaw from the checked-out `openclaw/` source tree and confirm the CLI is available.
+
+```bash
+cd openclaw
+pnpm install
+pnpm openclaw setup
+cd ..
+openclaw --version
+```
+
+If you already have a working host install, you can skip this step and just verify `openclaw --version`.
+
+2. Start the bridge container.
 
 ```bash
 ./scripts/dev-up.sh
 ```
 
-2. Build the plugin after editing `plugin/`.
+3. Build the plugin after editing `plugin/`.
 
 ```bash
 cd plugin
 npm run build
 ```
 
-3. Re-register the local plugin and restart OpenClaw Gateway.
+4. Register the local plugin with OpenClaw and restart Gateway.
 
 ```bash
 ./scripts/install-plugin-host.sh
 ```
 
-4. Watch the bridge logs while you exercise the flow.
+5. Watch the bridge logs while you exercise the flow.
 
 ```bash
 docker compose -f docker-compose.dev.yml logs -f bridge
 ```
 
-5. Stop the bridge when you are done.
+6. Stop the bridge when you are done.
 
 ```bash
 ./scripts/dev-down.sh
@@ -46,7 +59,7 @@ docker compose -f docker-compose.dev.yml logs -f bridge
 | Change | What to do |
 |--------|------------|
 | `bridge/` code | Re-run `./scripts/dev-up.sh` or restart the bridge container |
-| `plugin/` code | Re-run `npm run build`, then `./scripts/install-plugin-host.sh` |
+| `plugin/` code | Re-run `npm run build`, then `./scripts/install-plugin-host.sh` to register the plugin and restart Gateway |
 | `configs/openclaw/openclaw.json5` | Restart OpenClaw Gateway |
 | `.env` or bridge policy knobs | Restart the bridge container |
 
@@ -68,6 +81,7 @@ docker compose -f docker-compose.dev.yml logs -f bridge
 ### OpenClaw host layer
 
 - Confirm the local plugin path in `configs/openclaw/openclaw.json5`
+- Confirm `openclaw` is installed on the host, or set `OPENCLAW_BIN` to the binary path
 - Restart the gateway after any plugin or config change
 - If OpenClaw is calling the plugin but not the bridge, the problem is usually in the plugin payload or the bridge URL in the OpenClaw config
 
