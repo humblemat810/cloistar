@@ -45,9 +45,15 @@ def _start_approval_listener() -> bool:
     should_start_listener = os.getenv("OPENCLAW_APPROVAL_EVENT_SUBSCRIPTION") == "1"
     listener_script = _approval_listener_script()
     node_bin = os.getenv("OPENCLAW_NODE_BIN") or "node"
+    store.update_approval_subscription_status(
+        {
+            "enabled": should_start_listener,
+        }
+    )
     if not should_start_listener or not listener_script.exists():
         return False
     if approval_listener_process is not None and approval_listener_process.poll() is None:
+        store.update_approval_subscription_status({"started": True})
         return True
 
     env = dict(os.environ)
@@ -60,6 +66,7 @@ def _start_approval_listener() -> bool:
         stderr=sys.stderr,
         text=True,
     )
+    store.update_approval_subscription_status({"started": True})
     return True
 
 
@@ -100,6 +107,12 @@ def debug_state() -> dict:
 def start_gateway_approval_subscription() -> dict[str, bool]:
     started = _start_approval_listener()
     return {"ok": started}
+
+
+@app.post("/gateway/approval-subscription/status")
+def update_gateway_approval_subscription_status(payload: dict) -> dict:
+    status = store.update_approval_subscription_status(payload)
+    return {"ok": True, "status": status}
 
 
 @app.post("/policy/before-tool-call")

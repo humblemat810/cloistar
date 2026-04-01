@@ -162,6 +162,69 @@ class BridgeContractTests(unittest.TestCase):
             snapshot["gatewayApprovals"]["plugin:real-gateway-id"]["bridgeApprovalId"],
             approval_id,
         )
+        self.assertEqual(snapshot["approvalSubscription"]["lastRequestedEventAt"], 1_775_054_560_000)
+
+    def test_gateway_plugin_approval_resolution_links_to_existing_bridge_approval(self) -> None:
+        raw = load_fixture("openclaw", "before_tool_call.require_approval.json")
+        decision_response = self.client.post("/policy/before-tool-call", json=raw)
+        approval_id = decision_response.json()["approvalId"]
+
+        requested_payload = {
+            "id": "plugin:real-gateway-id",
+            "request": {
+                "toolName": raw["toolName"],
+                "toolCallId": raw["rawEvent"]["toolCallId"],
+                "sessionKey": raw["sessionId"],
+            },
+            "createdAtMs": 1_775_054_560_000,
+            "expiresAtMs": 1_775_054_680_000,
+        }
+        self.client.post("/gateway/plugin-approval/requested", json=requested_payload)
+
+        resolved_payload = {
+            "id": "plugin:real-gateway-id",
+            "decision": "allow-once",
+            "resolvedBy": "operator-cli",
+            "ts": 1_775_054_565_000,
+            "request": requested_payload["request"],
+        }
+        response = self.client.post("/gateway/plugin-approval/resolved", json=resolved_payload)
+
+        self.assertEqual(response.status_code, 200)
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["approvals"][approval_id]["gatewayApprovalId"], "plugin:real-gateway-id")
+        self.assertEqual(
+            snapshot["gatewayApprovals"]["plugin:real-gateway-id"]["decision"],
+            "allow-once",
+        )
+        self.assertEqual(snapshot["approvalSubscription"]["lastResolvedEventAt"], 1_775_054_565_000)
+
+    def test_gateway_approval_subscription_status_is_visible_in_debug_state(self) -> None:
+        response = self.client.post(
+            "/gateway/approval-subscription/status",
+            json={
+                "enabled": True,
+                "started": True,
+                "connected": False,
+                "lastError": "connect ECONNREFUSED 127.0.0.1:42097",
+                "lastStatusAt": 1_775_054_550_000,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        snapshot = store.snapshot()
+        self.assertEqual(
+            snapshot["approvalSubscription"],
+            {
+                "enabled": True,
+                "started": True,
+                "connected": False,
+                "lastError": "connect ECONNREFUSED 127.0.0.1:42097",
+                "lastRequestedEventAt": None,
+                "lastResolvedEventAt": None,
+                "lastStatusAt": 1_775_054_550_000,
+            },
+        )
 
     def test_after_tool_call_fixture_maps_raw_input_to_canonical_completion(self) -> None:
         raw = load_fixture("openclaw", "after_tool_call.success.json")

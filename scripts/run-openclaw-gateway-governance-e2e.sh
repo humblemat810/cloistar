@@ -644,6 +644,7 @@ Suggested agent runs:
 Approval note:
   This harness treats OpenClaw as an immutable external runtime. The bridge subscribes to live approval events through OpenClaw's compiled package surface and does not require editing or rebuilding OpenClaw source.
   Demo approval timeout defaults to 600000ms (10 minutes), which matches OpenClaw's max plugin approval timeout. Override with APPROVAL_TIMEOUT_MS if needed.
+  If gatewayApprovalId is missing, inspect approvalSubscription in bridge /debug/state before reading raw logs.
   A real approval-resolution proof still depends on the client/session surface. When OpenClaw forwards a plugin approval to a chat surface, the live command is:
   /approve <id> allow-once
   /approve <id> allow-always

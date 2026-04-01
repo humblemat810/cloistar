@@ -157,6 +157,7 @@ Approval timeout for demos:
 - The bridge now defaults demo approvals to `600000` ms (10 minutes).
 - That matches OpenClaw's documented maximum plugin approval timeout.
 - You can override it by exporting `APPROVAL_TIMEOUT_MS` before starting the helper, but values above `600000` will still be capped by OpenClaw.
+- If `gatewayApprovalId` is missing, inspect `approvalSubscription` in bridge `/debug/state` first. That is the bridge-side truth for whether the Gateway approval listener started, connected, and saw any approval events.
 
 If you want the helper to use a different Ollama base URL:
 

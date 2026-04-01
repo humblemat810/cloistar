@@ -12,6 +12,17 @@ class InMemoryStore:
     events: list[dict[str, Any]] = field(default_factory=list)
     approvals: dict[str, dict[str, Any]] = field(default_factory=dict)
     gateway_approvals: dict[str, dict[str, Any]] = field(default_factory=dict)
+    approval_subscription: dict[str, Any] = field(
+        default_factory=lambda: {
+            "enabled": False,
+            "started": False,
+            "connected": False,
+            "lastError": None,
+            "lastRequestedEventAt": None,
+            "lastResolvedEventAt": None,
+            "lastStatusAt": None,
+        }
+    )
     receipts: list[dict[str, Any]] = field(default_factory=list)
     _lock: Lock = field(default_factory=Lock)
 
@@ -73,6 +84,8 @@ class InMemoryStore:
             }
             self.gateway_approvals[gateway_approval_id] = row
             self._attach_bridge_approval_locked(row)
+            self.approval_subscription["lastRequestedEventAt"] = payload.get("createdAtMs")
+            self.approval_subscription["lastStatusAt"] = payload.get("createdAtMs")
             return dict(row)
 
     def resolve_gateway_approval(
@@ -102,6 +115,8 @@ class InMemoryStore:
             if request_data and not current.get("request"):
                 current["request"] = dict(request_data)
             self._attach_bridge_approval_locked(current)
+            self.approval_subscription["lastResolvedEventAt"] = payload.get("ts")
+            self.approval_subscription["lastStatusAt"] = payload.get("ts")
             return dict(current)
 
     def resolve_approval(
@@ -133,6 +148,7 @@ class InMemoryStore:
                 "events": list(self.events),
                 "approvals": dict(self.approvals),
                 "gatewayApprovals": dict(self.gateway_approvals),
+                "approvalSubscription": dict(self.approval_subscription),
                 "receipts": list(self.receipts),
             }
 
@@ -141,7 +157,33 @@ class InMemoryStore:
             self.events.clear()
             self.approvals.clear()
             self.gateway_approvals.clear()
+            self.approval_subscription = {
+                "enabled": False,
+                "started": False,
+                "connected": False,
+                "lastError": None,
+                "lastRequestedEventAt": None,
+                "lastResolvedEventAt": None,
+                "lastStatusAt": None,
+            }
             self.receipts.clear()
+
+    def update_approval_subscription_status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            current = dict(self.approval_subscription)
+            for key in (
+                "enabled",
+                "started",
+                "connected",
+                "lastError",
+                "lastRequestedEventAt",
+                "lastResolvedEventAt",
+                "lastStatusAt",
+            ):
+                if key in payload:
+                    current[key] = payload[key]
+            self.approval_subscription = current
+            return dict(current)
 
     @staticmethod
     def _normalize_gateway_approval_id(raw: Any) -> str | None:
