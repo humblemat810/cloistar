@@ -96,14 +96,14 @@ test("decisionToHookResult maps approval decisions and emits approval resolution
   assert.equal(result.requireApproval.severity, "critical");
   assert.equal(result.requireApproval.timeoutBehavior, "deny");
 
-  await result.requireApproval.onResolution("approved");
+  await result.requireApproval.onResolution("allow-once");
 
   assert.deepEqual(calls, [
     {
       pluginId: "kogwistar-governance",
       sessionId: "sess-3",
       toolName: "exec",
-      resolution: "approved",
+      resolution: "allow-once",
       approvalId: "approval-1",
       rawEvent: event,
     },
