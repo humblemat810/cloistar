@@ -1,0 +1,12 @@
+{
+  "eventType": "governance.tool_call_completed.v1",
+  "correlationId": "run-3",
+  "data": {
+    "outcome": "success",
+    "result": {
+      "exitCode": 0
+    },
+    "error": null,
+    "durationMs": 42
+  }
+}

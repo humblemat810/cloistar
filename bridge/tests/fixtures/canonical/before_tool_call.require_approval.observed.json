@@ -1,0 +1,20 @@
+{
+  "eventType": "governance.tool_call_observed.v1",
+  "correlationId": "run-2",
+  "data": {
+    "tool": {
+      "name": "exec",
+      "params": {
+        "command": "echo hello"
+      }
+    },
+    "executionContext": {
+      "sessionId": "sess-2",
+      "runId": "run-2",
+      "toolCallId": "call-2"
+    },
+    "sourceRef": {
+      "pluginId": "kogwistar-governance"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "pluginId": "kogwistar-governance",
+  "sessionId": "sess-2",
+  "toolName": "exec",
+  "params": {
+    "command": "echo hello"
+  },
+  "rawEvent": {
+    "kind": "before_tool_call",
+    "toolName": "exec",
+    "params": {
+      "command": "echo hello"
+    },
+    "runId": "run-2",
+    "toolCallId": "call-2"
+  }
+}

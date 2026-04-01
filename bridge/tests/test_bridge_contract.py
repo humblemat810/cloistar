@@ -1,11 +1,52 @@
 from __future__ import annotations
 
+import json
 import unittest
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
 
 from fastapi.testclient import TestClient
 
+from bridge.app.integrations.openclaw_dto import (
+    OpenClawAfterToolCallPayload,
+    OpenClawApprovalResolutionPayload,
+    OpenClawBeforeToolCallPayload,
+)
+from bridge.app.integrations.openclaw_mapper import (
+    build_receipt,
+    canonicalize_after_tool_call,
+    canonicalize_before_tool_call,
+)
 from bridge.app.main import app
+from bridge.app.policy import decide
+from bridge.app.projections.openclaw_projection import project_decision
 from bridge.app.store import store
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def load_fixture(*parts: str) -> Any:
+    return json.loads((FIXTURES.joinpath(*parts)).read_text())
+
+
+def assert_subset(test_case: unittest.TestCase, expected: Any, actual: Any) -> None:
+    if isinstance(expected, dict):
+        test_case.assertIsInstance(actual, dict)
+        for key, value in expected.items():
+            test_case.assertIn(key, actual)
+            assert_subset(test_case, value, actual[key])
+        return
+
+    if isinstance(expected, list):
+        test_case.assertIsInstance(actual, list)
+        test_case.assertEqual(len(expected), len(actual))
+        for expected_item, actual_item in zip(expected, actual):
+            assert_subset(test_case, expected_item, actual_item)
+        return
+
+    test_case.assertEqual(expected, actual)
 
 
 class BridgeContractTests(unittest.TestCase):
@@ -13,113 +54,130 @@ class BridgeContractTests(unittest.TestCase):
         store.reset()
         self.client = TestClient(app)
 
-    def test_before_tool_call_blocks_destructive_command(self) -> None:
-        response = self.client.post(
-            "/policy/before-tool-call",
-            json={
-                "pluginId": "kogwistar-governance",
-                "sessionId": "sess-1",
-                "toolName": "exec",
-                "params": {"command": "rm -rf /"},
-                "rawEvent": {"kind": "before_tool_call"},
-            },
+    def test_block_fixture_maps_raw_input_to_canonical_event_and_projection(self) -> None:
+        raw = load_fixture("openclaw", "before_tool_call.block.json")
+        payload = OpenClawBeforeToolCallPayload.model_validate(raw)
+
+        receipt = build_receipt("before_tool_call", payload)
+        observed_event = canonicalize_before_tool_call(payload, receipt)
+
+        expected_event = load_fixture("canonical", "before_tool_call.block.observed.json")
+        assert_subset(self, expected_event, observed_event.model_dump(mode="json"))
+        self.assertTrue(observed_event.subject.governanceCallId)
+
+        evaluation = decide(payload.toolName, payload.params)
+        projection = project_decision(evaluation)
+        expected_projection = load_fixture("projections", "before_tool_call.block.outbound.json")
+        self.assertEqual(projection.model_dump(mode="json"), expected_projection)
+
+    def test_require_approval_fixture_maps_raw_input_to_canonical_event_and_projection(self) -> None:
+        raw = load_fixture("openclaw", "before_tool_call.require_approval.json")
+        payload = OpenClawBeforeToolCallPayload.model_validate(raw)
+
+        receipt = build_receipt("before_tool_call", payload)
+        observed_event = canonicalize_before_tool_call(payload, receipt)
+
+        expected_event = load_fixture("canonical", "before_tool_call.require_approval.observed.json")
+        assert_subset(self, expected_event, observed_event.model_dump(mode="json"))
+
+        evaluation = decide(payload.toolName, payload.params)
+        projection = project_decision(evaluation, "approval-123")
+        expected_projection = load_fixture(
+            "projections",
+            "before_tool_call.require_approval.outbound.json",
         )
+        actual_projection = projection.model_dump(mode="json")
+        self.assertEqual(actual_projection["approvalId"], "approval-123")
+        del actual_projection["approvalId"]
+        self.assertEqual(actual_projection, expected_projection)
+
+    def test_before_tool_call_block_endpoint_appends_canonical_events(self) -> None:
+        raw = load_fixture("openclaw", "before_tool_call.block.json")
+
+        response = self.client.post("/policy/before-tool-call", json=raw)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
-            {
-                "decision": "block",
-                "reason": "Blocked by policy marker: rm -rf",
-            },
+            load_fixture("projections", "before_tool_call.block.outbound.json"),
         )
 
         snapshot = store.snapshot()
-        self.assertEqual(snapshot["events"][0]["type"], "tool_call_proposed")
-        self.assertEqual(snapshot["events"][1]["type"], "tool_call_blocked")
-
-    def test_before_tool_call_requests_approval_for_dangerous_tool(self) -> None:
-        response = self.client.post(
-            "/policy/before-tool-call",
-            json={
-                "pluginId": "kogwistar-governance",
-                "sessionId": "sess-2",
-                "toolName": "exec",
-                "params": {"command": "echo hello"},
-                "rawEvent": {"kind": "before_tool_call"},
-            },
+        self.assertEqual(
+            [event["eventType"] for event in snapshot["events"]],
+            [
+                "governance.tool_call_observed.v1",
+                "governance.decision_recorded.v1",
+            ],
         )
+        self.assertEqual(len(snapshot["receipts"]), 1)
+        self.assertEqual(snapshot["approvals"], {})
+
+    def test_before_tool_call_require_approval_endpoint_appends_canonical_events(self) -> None:
+        raw = load_fixture("openclaw", "before_tool_call.require_approval.json")
+
+        response = self.client.post("/policy/before-tool-call", json=raw)
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["decision"], "requireApproval")
-        self.assertEqual(payload["title"], "Approval required for exec")
         self.assertIn("approvalId", payload)
+        self.assertEqual(payload["title"], "Approval required for exec")
 
         snapshot = store.snapshot()
-        self.assertIn(payload["approvalId"], snapshot["approvals"])
         self.assertEqual(
-            snapshot["events"][-1]["type"], "tool_call_approval_requested"
+            [event["eventType"] for event in snapshot["events"]],
+            [
+                "governance.tool_call_observed.v1",
+                "governance.decision_recorded.v1",
+                "governance.approval_requested.v1",
+                "governance.execution_suspended.v1",
+            ],
         )
+        self.assertEqual(snapshot["approvals"][payload["approvalId"]]["status"], "pending")
+        self.assertEqual(len(snapshot["receipts"]), 1)
 
-    def test_after_tool_call_records_completion_event(self) -> None:
-        response = self.client.post(
-            "/events/after-tool-call",
-            json={
-                "pluginId": "kogwistar-governance",
-                "sessionId": "sess-3",
-                "toolName": "exec",
-                "params": {"command": "echo hello"},
-                "result": {"exitCode": 0},
-                "rawEvent": {"kind": "after_tool_call"},
-            },
-        )
+    def test_after_tool_call_fixture_maps_raw_input_to_canonical_completion(self) -> None:
+        raw = load_fixture("openclaw", "after_tool_call.success.json")
+        payload = OpenClawAfterToolCallPayload.model_validate(raw)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"ok": True})
-        self.assertEqual(store.snapshot()["events"][-1]["type"], "tool_call_completed")
+        receipt = build_receipt("after_tool_call", payload)
+        completed_event = canonicalize_after_tool_call(payload, receipt)
 
-    def test_approval_resolution_updates_pending_approval(self) -> None:
-        decision_response = self.client.post(
-            "/policy/before-tool-call",
-            json={
-                "pluginId": "kogwistar-governance",
-                "sessionId": "sess-4",
-                "toolName": "exec",
-                "params": {"command": "echo hello"},
-                "rawEvent": {"kind": "before_tool_call"},
-            },
-        )
+        expected_event = load_fixture("canonical", "after_tool_call.success.completed.json")
+        assert_subset(self, expected_event, completed_event.model_dump(mode="json"))
+
+    def test_approval_resolution_appends_resolution_and_resume_events(self) -> None:
+        before_raw = load_fixture("openclaw", "before_tool_call.require_approval.json")
+        decision_response = self.client.post("/policy/before-tool-call", json=before_raw)
         approval_id = decision_response.json()["approvalId"]
 
-        response = self.client.post(
-            "/approval/resolution",
-            json={
-                "pluginId": "kogwistar-governance",
-                "sessionId": "sess-4",
-                "toolName": "exec",
-                "approvalId": approval_id,
-                "resolution": "approved",
-                "rawEvent": {"kind": "approval_resolution"},
-            },
-        )
+        resolution_raw = load_fixture("openclaw", "approval_resolution.allow_once.json")
+        resolution_raw = deepcopy(resolution_raw)
+        resolution_raw["approvalId"] = approval_id
+        payload = OpenClawApprovalResolutionPayload.model_validate(resolution_raw)
+
+        response = self.client.post("/approval/resolution", json=payload.model_dump(mode="json"))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"ok": True})
-        self.assertEqual(store.snapshot()["approvals"][approval_id]["status"], "approved")
+
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["approvals"][approval_id]["status"], "allow_once")
+        self.assertEqual(
+            [event["eventType"] for event in snapshot["events"][-2:]],
+            [
+                "governance.approval_resolved.v1",
+                "governance.execution_resumed.v1",
+            ],
+        )
 
     def test_approval_resolution_for_unknown_id_returns_404(self) -> None:
-        response = self.client.post(
-            "/approval/resolution",
-            json={
-                "pluginId": "kogwistar-governance",
-                "sessionId": "sess-5",
-                "toolName": "exec",
-                "approvalId": "missing-approval",
-                "resolution": "approved",
-                "rawEvent": {"kind": "approval_resolution"},
-            },
-        )
+        raw = load_fixture("openclaw", "approval_resolution.allow_once.json")
+        raw = deepcopy(raw)
+        raw["approvalId"] = "missing-approval"
+
+        response = self.client.post("/approval/resolution", json=raw)
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "approval not found")

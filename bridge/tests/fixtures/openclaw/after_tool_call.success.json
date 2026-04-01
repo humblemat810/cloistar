@@ -1,0 +1,22 @@
+{
+  "pluginId": "kogwistar-governance",
+  "sessionId": "sess-3",
+  "toolName": "exec",
+  "params": {
+    "command": "echo hello"
+  },
+  "result": {
+    "exitCode": 0
+  },
+  "durationMs": 42,
+  "rawEvent": {
+    "kind": "after_tool_call",
+    "toolName": "exec",
+    "params": {
+      "command": "echo hello"
+    },
+    "runId": "run-3",
+    "toolCallId": "call-3",
+    "durationMs": 42
+  }
+}

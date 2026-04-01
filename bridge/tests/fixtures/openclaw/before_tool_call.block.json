@@ -1,0 +1,17 @@
+{
+  "pluginId": "kogwistar-governance",
+  "sessionId": "sess-1",
+  "toolName": "exec",
+  "params": {
+    "command": "rm -rf /"
+  },
+  "rawEvent": {
+    "kind": "before_tool_call",
+    "toolName": "exec",
+    "params": {
+      "command": "rm -rf /"
+    },
+    "runId": "run-1",
+    "toolCallId": "call-1"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "decision": "requireApproval",
+  "title": "Approval required for exec",
+  "description": "This tool is marked dangerous and requires explicit approval.",
+  "severity": "warning",
+  "timeoutMs": 120000,
+  "timeoutBehavior": "deny"
+}

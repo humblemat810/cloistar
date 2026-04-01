@@ -1,0 +1,20 @@
+{
+  "eventType": "governance.tool_call_observed.v1",
+  "correlationId": "run-1",
+  "data": {
+    "tool": {
+      "name": "exec",
+      "params": {
+        "command": "rm -rf /"
+      }
+    },
+    "executionContext": {
+      "sessionId": "sess-1",
+      "runId": "run-1",
+      "toolCallId": "call-1"
+    },
+    "sourceRef": {
+      "pluginId": "kogwistar-governance"
+    }
+  }
+}

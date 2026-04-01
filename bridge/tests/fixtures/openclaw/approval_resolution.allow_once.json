@@ -1,0 +1,11 @@
+{
+  "pluginId": "kogwistar-governance",
+  "sessionId": "sess-2",
+  "toolName": "exec",
+  "approvalId": "__APPROVAL_ID__",
+  "resolution": "allow-once",
+  "rawEvent": {
+    "kind": "approval_resolution",
+    "runId": "run-2"
+  }
+}
