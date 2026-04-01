@@ -1,7 +1,34 @@
 {
+  "id": "kogwistar-governance",
   "name": "@kogwistar/openclaw-governance",
+  "description": "Delegates OpenClaw tool governance decisions to a Kogwistar bridge",
   "version": "0.1.0",
   "type": "module",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "bridgeUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:8788"
+      },
+      "requestTimeoutMs": {
+        "type": "number",
+        "default": 3000
+      },
+      "defaultSeverity": {
+        "anyOf": [
+          { "type": "string", "const": "info" },
+          { "type": "string", "const": "warning" },
+          { "type": "string", "const": "critical" }
+        ]
+      },
+      "logPayloads": {
+        "type": "boolean",
+        "default": false
+      }
+    }
+  },
   "openclaw": {
     "extensions": ["./dist/index.js"],
     "compat": {

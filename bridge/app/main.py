@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 
 from .domain.governance_append import append_approval_resolution, append_event, register_approval_request
@@ -21,10 +27,62 @@ from .policy import decide
 from .projections.openclaw_projection import project_decision
 from .store import store
 
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _approval_listener_script() -> Path:
+    return _repo_root() / "scripts" / "lib" / "openclaw-gateway-approval-listener.mjs"
+
+
+approval_listener_process: subprocess.Popen[str] | None = None
+
+
+def _start_approval_listener() -> bool:
+    global approval_listener_process
+
+    should_start_listener = os.getenv("OPENCLAW_APPROVAL_EVENT_SUBSCRIPTION") == "1"
+    listener_script = _approval_listener_script()
+    node_bin = os.getenv("OPENCLAW_NODE_BIN") or "node"
+    if not should_start_listener or not listener_script.exists():
+        return False
+    if approval_listener_process is not None and approval_listener_process.poll() is None:
+        return True
+
+    env = dict(os.environ)
+    env.setdefault("BRIDGE_URL", "http://127.0.0.1:8788")
+    approval_listener_process = subprocess.Popen(
+        [node_bin, str(listener_script)],
+        cwd=str(_repo_root()),
+        env=env,
+        stdout=sys.stderr,
+        stderr=sys.stderr,
+        text=True,
+    )
+    return True
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global approval_listener_process
+    try:
+        yield
+    finally:
+        if approval_listener_process is not None and approval_listener_process.poll() is None:
+            approval_listener_process.terminate()
+            try:
+                approval_listener_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                approval_listener_process.kill()
+        approval_listener_process = None
+
+
 app = FastAPI(
     title="Kogwistar OpenClaw Bridge",
     version="0.1.0",
     description="Thin governance bridge between OpenClaw hooks and Kogwistar.",
+    lifespan=lifespan,
 )
 
 
@@ -36,6 +94,12 @@ def healthz() -> dict[str, str]:
 @app.get("/debug/state")
 def debug_state() -> dict:
     return store.snapshot()
+
+
+@app.post("/gateway/approval-subscription/start")
+def start_gateway_approval_subscription() -> dict[str, bool]:
+    started = _start_approval_listener()
+    return {"ok": started}
 
 
 @app.post("/policy/before-tool-call")
@@ -94,4 +158,16 @@ def approval_resolution(payload: OpenClawApprovalResolutionPayload) -> dict:
     if updated is None:
         raise HTTPException(status_code=404, detail="approval not found")
 
+    return {"ok": True}
+
+
+@app.post("/gateway/plugin-approval/requested")
+def gateway_plugin_approval_requested(payload: dict) -> dict:
+    store.register_gateway_approval("plugin", payload)
+    return {"ok": True}
+
+
+@app.post("/gateway/plugin-approval/resolved")
+def gateway_plugin_approval_resolved(payload: dict) -> dict:
+    store.resolve_gateway_approval("plugin", payload)
     return {"ok": True}

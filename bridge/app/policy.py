@@ -22,6 +22,7 @@ APPROVAL_PATTERNS = [
     for item in os.getenv("APPROVAL_PATTERNS", "delete,drop,truncate,chmod 777").split(",")
     if item.strip()
 ]
+APPROVAL_TIMEOUT_MS = max(1, min(int(os.getenv("APPROVAL_TIMEOUT_MS", "600000")), 600000))
 
 
 def _flatten(value: Any) -> str:
@@ -75,6 +76,7 @@ def decide(tool_name: str | None, params: Any) -> PolicyEvaluation:
                 title=f"Approval required for {tool}",
                 description="This tool is marked dangerous and requires explicit approval.",
                 severity="warning",
+                timeoutMs=APPROVAL_TIMEOUT_MS,
             ),
         )
 
@@ -98,6 +100,7 @@ def decide(tool_name: str | None, params: Any) -> PolicyEvaluation:
                     title="Approval required",
                     description=f"Request matched approval marker: {marker}",
                     severity="warning",
+                    timeoutMs=APPROVAL_TIMEOUT_MS,
                 ),
             )
 
