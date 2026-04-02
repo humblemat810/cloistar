@@ -25,6 +25,7 @@ from .integrations.openclaw_mapper import (
 )
 from .policy import decide
 from .projections.openclaw_projection import project_decision
+from .runtime import get_governance_runtime_host
 from .store import store
 
 
@@ -123,7 +124,29 @@ def before_tool_call(payload: OpenClawBeforeToolCallPayload) -> dict:
     observed_event = canonicalize_before_tool_call(payload, receipt)
     append_event(store, observed_event)
 
-    evaluation = decide(observed_event.data.tool.name, observed_event.data.tool.params)
+    runtime_decision = None
+    try:
+        runtime_decision = get_governance_runtime_host().evaluate_proposal(
+            observed_event,
+            policy_evaluator=decide,
+            store=store,
+        )
+        evaluation = runtime_decision.evaluation
+        store.upsert_workflow_run(observed_event.subject.governanceCallId, runtime_decision.workflow)
+        store.upsert_governance_projection(observed_event.subject.governanceCallId, runtime_decision.projection)
+    except Exception as exc:
+        evaluation = decide(observed_event.data.tool.name, observed_event.data.tool.params)
+        store.upsert_workflow_run(
+            observed_event.subject.governanceCallId,
+            {
+                "status": "runtime_fallback",
+                "workflowId": None,
+                "runId": None,
+                "decision": evaluation.disposition,
+                "runtimeError": str(exc),
+            },
+        )
+
     decision_event = decision_event_from_policy(observed_event, evaluation)
     append_event(store, decision_event)
 
@@ -134,6 +157,18 @@ def before_tool_call(payload: OpenClawBeforeToolCallPayload) -> dict:
         append_event(store, suspended_event)
         register_approval_request(store, approval_event, suspended_event.data.suspensionId)
         approval_id = approval_event.data.approvalRequestId
+        if runtime_decision is not None:
+            store.attach_runtime_to_approval(
+                approval_id,
+                {
+                    "workflowId": runtime_decision.workflow.get("workflowId"),
+                    "workflowRunId": runtime_decision.workflow.get("runId"),
+                    "runtimeConversationId": runtime_decision.workflow.get("conversationId"),
+                    "runtimeTurnNodeId": runtime_decision.workflow.get("turnNodeId"),
+                    "suspendedNodeId": runtime_decision.workflow.get("suspendedNodeId"),
+                    "suspendedTokenId": runtime_decision.workflow.get("suspendedTokenId"),
+                },
+            )
 
     return project_decision(evaluation, approval_id).model_dump()
 
@@ -144,6 +179,28 @@ def after_tool_call(payload: OpenClawAfterToolCallPayload) -> dict:
     store.record_receipt(receipt)
     completed_event = canonicalize_after_tool_call(payload, receipt)
     append_event(store, completed_event)
+    workflow_run = store.get_workflow_run(completed_event.subject.governanceCallId)
+    if workflow_run is not None:
+        try:
+            projection = get_governance_runtime_host().record_completion(
+                completed_event.subject.governanceCallId,
+                completed_event=completed_event,
+                workflow_run=workflow_run,
+            )
+            if projection is not None:
+                store.upsert_governance_projection(completed_event.subject.governanceCallId, projection)
+                store.upsert_workflow_run(
+                    completed_event.subject.governanceCallId,
+                    {
+                        "status": "completed",
+                        "projection": projection,
+                    },
+                )
+        except Exception as exc:
+            store.upsert_workflow_run(
+                completed_event.subject.governanceCallId,
+                {"completionProjectionError": str(exc)},
+            )
     return {"ok": True}
 
 
@@ -170,6 +227,23 @@ def approval_resolution(payload: OpenClawApprovalResolutionPayload) -> dict:
     updated = append_approval_resolution(store, resolved_event, follow_up_event)
     if updated is None:
         raise HTTPException(status_code=404, detail="approval not found")
+
+    runtime_resume = None
+    try:
+        runtime_resume = get_governance_runtime_host().resume_approval(
+            approval,
+            resolution=resolved_event.data.resolution,
+            resolved_at=resolved_event.data.resolvedAt.isoformat(),
+        )
+    except Exception as exc:
+        store.upsert_workflow_run(
+            approval["governanceCallId"],
+            {"resumeError": str(exc)},
+        )
+
+    if runtime_resume is not None:
+        store.upsert_workflow_run(approval["governanceCallId"], runtime_resume.workflow)
+        store.upsert_governance_projection(approval["governanceCallId"], runtime_resume.projection)
 
     return {"ok": True}
 

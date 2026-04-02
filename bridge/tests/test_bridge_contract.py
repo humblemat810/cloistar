@@ -21,6 +21,7 @@ from bridge.app.integrations.openclaw_mapper import (
 from bridge.app.main import app
 from bridge.app.policy import decide
 from bridge.app.projections.openclaw_projection import project_decision
+from bridge.app.runtime import reset_governance_runtime_host
 from bridge.app.store import store
 
 
@@ -51,6 +52,7 @@ def assert_subset(test_case: unittest.TestCase, expected: Any, actual: Any) -> N
 
 class BridgeContractTests(unittest.TestCase):
     def setUp(self) -> None:
+        reset_governance_runtime_host()
         store.reset()
         self.client = TestClient(app)
 
@@ -136,6 +138,21 @@ class BridgeContractTests(unittest.TestCase):
         )
         self.assertEqual(snapshot["approvals"][payload["approvalId"]]["status"], "pending")
         self.assertEqual(len(snapshot["receipts"]), 1)
+        governance_call_id = snapshot["events"][0]["subject"]["governanceCallId"]
+        self.assertEqual(snapshot["workflowRuns"][governance_call_id]["status"], "suspended")
+        self.assertEqual(
+            snapshot["governanceProjection"][governance_call_id]["proposalNodeId"].startswith("gov|"),
+            True,
+        )
+        self.assertEqual(
+            snapshot["governanceProjection"][governance_call_id]["approvalNodeId"].startswith("gov|"),
+            True,
+        )
+        self.assertEqual(
+            snapshot["approvals"][payload["approvalId"]]["workflowRunId"].startswith("govrun:"),
+            True,
+        )
+        self.assertTrue(snapshot["approvals"][payload["approvalId"]]["suspendedTokenId"])
 
     def test_gateway_plugin_approval_request_links_real_gateway_id_to_bridge_approval(self) -> None:
         raw = load_fixture("openclaw", "before_tool_call.require_approval.json")
@@ -260,6 +277,41 @@ class BridgeContractTests(unittest.TestCase):
                 "governance.execution_resumed.v1",
             ],
         )
+        governance_call_id = snapshot["events"][0]["subject"]["governanceCallId"]
+        self.assertEqual(snapshot["workflowRuns"][governance_call_id]["status"], "succeeded")
+        self.assertEqual(snapshot["workflowRuns"][governance_call_id]["finalDisposition"], "allow")
+        self.assertIn("resolutionNodeId", snapshot["governanceProjection"][governance_call_id])
+
+    def test_after_tool_call_updates_governance_projection_completion_state(self) -> None:
+        before_raw = load_fixture("openclaw", "before_tool_call.require_approval.json")
+        decision_response = self.client.post("/policy/before-tool-call", json=before_raw)
+        approval_id = decision_response.json()["approvalId"]
+
+        resolution_raw = load_fixture("openclaw", "approval_resolution.allow_once.json")
+        resolution_raw = deepcopy(resolution_raw)
+        resolution_raw["approvalId"] = approval_id
+        self.client.post("/approval/resolution", json=resolution_raw)
+
+        after_raw = load_fixture("openclaw", "after_tool_call.success.json")
+        after_raw = deepcopy(after_raw)
+        after_raw["sessionId"] = before_raw["sessionId"]
+        after_raw["toolName"] = before_raw["toolName"]
+        after_raw["params"] = deepcopy(before_raw["params"])
+        after_raw["rawEvent"]["toolName"] = before_raw["rawEvent"]["toolName"]
+        after_raw["rawEvent"]["params"] = deepcopy(before_raw["rawEvent"]["params"])
+        after_raw["rawEvent"]["runId"] = before_raw["rawEvent"]["runId"]
+        after_raw["rawEvent"]["toolCallId"] = before_raw["rawEvent"]["toolCallId"]
+        response = self.client.post("/events/after-tool-call", json=after_raw)
+
+        self.assertEqual(response.status_code, 200)
+        governance_call_id = store.snapshot()["events"][0]["subject"]["governanceCallId"]
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["workflowRuns"][governance_call_id]["status"], "completed")
+        self.assertEqual(
+            snapshot["governanceProjection"][governance_call_id]["completionOutcome"],
+            "success",
+        )
+        self.assertIn("completionNodeId", snapshot["governanceProjection"][governance_call_id])
 
     def test_approval_resolution_for_unknown_id_returns_404(self) -> None:
         raw = load_fixture("openclaw", "approval_resolution.allow_once.json")

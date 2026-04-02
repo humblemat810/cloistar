@@ -12,6 +12,8 @@ class InMemoryStore:
     events: list[dict[str, Any]] = field(default_factory=list)
     approvals: dict[str, dict[str, Any]] = field(default_factory=dict)
     gateway_approvals: dict[str, dict[str, Any]] = field(default_factory=dict)
+    workflow_runs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    governance_projection: dict[str, dict[str, Any]] = field(default_factory=dict)
     approval_subscription: dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": False,
@@ -148,6 +150,8 @@ class InMemoryStore:
                 "events": list(self.events),
                 "approvals": dict(self.approvals),
                 "gatewayApprovals": dict(self.gateway_approvals),
+                "workflowRuns": dict(self.workflow_runs),
+                "governanceProjection": dict(self.governance_projection),
                 "approvalSubscription": dict(self.approval_subscription),
                 "receipts": list(self.receipts),
             }
@@ -157,6 +161,8 @@ class InMemoryStore:
             self.events.clear()
             self.approvals.clear()
             self.gateway_approvals.clear()
+            self.workflow_runs.clear()
+            self.governance_projection.clear()
             self.approval_subscription = {
                 "enabled": False,
                 "started": False,
@@ -167,6 +173,41 @@ class InMemoryStore:
                 "lastStatusAt": None,
             }
             self.receipts.clear()
+
+    def upsert_workflow_run(self, governance_call_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            current = dict(self.workflow_runs.get(governance_call_id, {}))
+            current.update(payload)
+            current["governanceCallId"] = governance_call_id
+            self.workflow_runs[governance_call_id] = current
+            return dict(current)
+
+    def get_workflow_run(self, governance_call_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            current = self.workflow_runs.get(governance_call_id)
+            if current is None:
+                return None
+            return dict(current)
+
+    def upsert_governance_projection(self, governance_call_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            current = dict(self.governance_projection.get(governance_call_id, {}))
+            current.update(payload)
+            current["governanceCallId"] = governance_call_id
+            self.governance_projection[governance_call_id] = current
+
+            workflow_run = self.workflow_runs.get(governance_call_id)
+            if workflow_run is not None:
+                workflow_run["projection"] = dict(current)
+            return dict(current)
+
+    def attach_runtime_to_approval(self, approval_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        with self._lock:
+            current = self.approvals.get(approval_id)
+            if current is None:
+                return None
+            current.update(payload)
+            return dict(current)
 
     def update_approval_subscription_status(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
