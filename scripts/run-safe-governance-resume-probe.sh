@@ -64,6 +64,7 @@ approval_row = {
     "runtimeTurnNodeId": decision.workflow.get("turnNodeId"),
     "suspendedNodeId": decision.workflow.get("suspendedNodeId"),
     "suspendedTokenId": decision.workflow.get("suspendedTokenId"),
+    "runtimeProjection": dict(decision.projection or {}),
 }
 
 print("[2/3] resuming approval")

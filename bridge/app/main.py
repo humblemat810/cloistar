@@ -167,6 +167,7 @@ def before_tool_call(payload: OpenClawBeforeToolCallPayload) -> dict:
                     "runtimeTurnNodeId": runtime_decision.workflow.get("turnNodeId"),
                     "suspendedNodeId": runtime_decision.workflow.get("suspendedNodeId"),
                     "suspendedTokenId": runtime_decision.workflow.get("suspendedTokenId"),
+                    "runtimeProjection": dict(runtime_decision.projection),
                 },
             )
 

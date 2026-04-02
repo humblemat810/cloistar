@@ -165,7 +165,10 @@ class GovernanceRuntimeHost:
             conversation_id=conversation_id,
             turn_node_id=turn_node_id,
         )
-        projection = self._projection_from_state(result.final_state)
+        projection = self._merge_projection(
+            approval_row.get("runtimeProjection"),
+            self._projection_from_state(result.final_state),
+        )
         projection = self._record_resolution_projection(
             projection=projection,
             workflow_id=workflow_id,
@@ -244,6 +247,14 @@ class GovernanceRuntimeHost:
     def _projection_from_state(state: dict[str, Any]) -> dict[str, Any]:
         projection = state.get("governance_projection")
         return dict(projection) if isinstance(projection, dict) else {}
+
+    @staticmethod
+    def _merge_projection(*parts: Any) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        for part in parts:
+            if isinstance(part, dict):
+                merged.update(part)
+        return merged
 
     def _record_resolution_projection(
         self,

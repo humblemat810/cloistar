@@ -669,6 +669,155 @@ That behavior is described in OpenClaw’s docs and source:
 - [hooks.md](/home/azureuser/cloistar/openclaw/docs/automation/hooks.md#L499)
 - [exec-approvals.md](/home/azureuser/cloistar/openclaw/docs/tools/exec-approvals.md#L368)
 
+## Three-Terminal Harness Cases
+
+The subprocess harness in [run-openclaw-governance-three-terminal.py](/home/azureuser/cloistar/scripts/run-openclaw-governance-three-terminal.py) now documents and supports these cases:
+
+Two live E2E styles now exist:
+
+- self-starting
+  - The harness starts the helper itself, which in turn starts bridge + gateway + isolated OpenClaw state.
+  - This is the simplest fully self-contained live test path.
+  - By default the harness uses `--stable-run-dir`, so it reuses the standard persistent run directory at:
+
+```bash
+/home/azureuser/cloistar/.tmp/openclaw-gateway-e2e/current
+```
+
+  - If you want an isolated disposable run directory instead, pass `--no-stable-run-dir --run-dir <path>`.
+- attached-stack
+  - The harness assumes the helper is already running and attaches only the agent + approver subprocesses to that existing stack.
+  - This is useful when you want to keep one stable run directory alive and run multiple live cases against it.
+  - In attached-stack mode, `--run-dir` must point at the already existing isolated OpenClaw state that matches the running bridge/gateway.
+  - If you omit `--run-dir`, the harness defaults to the same standard run directory:
+
+```bash
+/home/azureuser/cloistar/.tmp/openclaw-gateway-e2e/current
+```
+
+  - That default is only correct if your existing helper was started against that same run directory.
+
+- `allow`
+  - Uses a read-tool prompt against the generated proof file.
+  - Expected behavior: no approval flow; tool completes and returns the proof text.
+- `block`
+  - Uses a destructive exec prompt such as `rm -rf ./blocked-demo`.
+  - Expected behavior: policy blocks before any approval request is created.
+- `approval`
+  - Uses `exec echo hello`.
+  - Expected behavior: bridge policy creates `requireApproval`, then the approval surface decides what happens next.
+
+For the `approval` case, the harness supports these approval modes:
+
+- `auto-allow`
+  - Auto-resolve bridge plugin approvals and downstream OpenClaw exec approvals with `allow-once`.
+- `auto-deny`
+  - Auto-resolve bridge plugin approvals and downstream OpenClaw exec approvals with `deny`.
+- `manual`
+  - Prompt on the console for each approval decision.
+- `llm`
+  - Use a second OpenClaw agent call as a simple approval judge that returns `ALLOW_ONCE` or `DENY`.
+
+Examples:
+
+```bash
+/home/azureuser/cloistar/.venv/bin/python \
+  scripts/run-openclaw-governance-three-terminal.py \
+  --demo-case allow
+```
+
+```bash
+/home/azureuser/cloistar/.venv/bin/python \
+  scripts/run-openclaw-governance-three-terminal.py \
+  --demo-case block
+```
+
+```bash
+/home/azureuser/cloistar/.venv/bin/python \
+  scripts/run-openclaw-governance-three-terminal.py \
+  --demo-case approval \
+  --approval-mode auto-allow
+```
+
+```bash
+/home/azureuser/cloistar/.venv/bin/python \
+  scripts/run-openclaw-governance-three-terminal.py \
+  --demo-case approval \
+  --approval-mode manual
+```
+
+```bash
+/home/azureuser/cloistar/.venv/bin/python \
+  scripts/run-openclaw-governance-three-terminal.py \
+  --demo-case approval \
+  --approval-mode llm
+```
+
+Attached-stack example:
+
+```bash
+RUN_DIR="/home/azureuser/cloistar/.tmp/openclaw-gateway-e2e/current"
+/home/azureuser/cloistar/.venv/bin/python \
+  scripts/run-openclaw-governance-three-terminal.py \
+  --use-existing-stack \
+  --bridge-url http://127.0.0.1:<bridge-port> \
+  --run-dir "$RUN_DIR" \
+  --demo-case approval \
+  --approval-mode auto-allow
+```
+
+Run directory rule of thumb:
+
+- self-starting harness with no extra flags:
+  - automatically uses the default stable run directory
+- self-starting harness with `--no-stable-run-dir --run-dir ...`:
+  - creates/uses that explicit disposable run directory
+- attached-stack harness:
+  - must attach to the same run directory the already running helper/OpenClaw stack is using
+
+The matching pytest coverage is now split the same way:
+
+- self-starting live E2E:
+  - [test_openclaw_three_terminal_e2e.py](/home/azureuser/cloistar/bridge/tests/test_openclaw_three_terminal_e2e.py)
+- attached-stack live E2E:
+  - [test_openclaw_three_terminal_existing_stack_e2e.py](/home/azureuser/cloistar/bridge/tests/test_openclaw_three_terminal_existing_stack_e2e.py)
+
+Quick run commands:
+
+- Fast in-process integration matrix:
+
+```bash
+/home/azureuser/cloistar/.venv/bin/python -m pytest \
+  bridge/tests/test_policy_matrix_pytest.py -q
+```
+
+- Self-starting live E2E:
+
+```bash
+OPENCLAW_RUN_E2E=1 \
+/home/azureuser/cloistar/.venv/bin/python -m pytest \
+  bridge/tests/test_openclaw_three_terminal_e2e.py -q
+```
+
+- Self-starting live E2E with manual approval case enabled:
+
+```bash
+OPENCLAW_RUN_E2E=1 OPENCLAW_RUN_MANUAL_E2E=1 \
+/home/azureuser/cloistar/.venv/bin/python -m pytest \
+  bridge/tests/test_openclaw_three_terminal_e2e.py -q
+```
+
+- Attached-stack live E2E:
+
+```bash
+OPENCLAW_RUN_E2E=1 \
+OPENCLAW_RUN_EXISTING_STACK_E2E=1 \
+OPENCLAW_EXISTING_BRIDGE_URL=http://127.0.0.1:<bridge-port> \
+OPENCLAW_EXISTING_RUN_DIR=/home/azureuser/cloistar/.tmp/openclaw-gateway-e2e/current \
+/home/azureuser/cloistar/.venv/bin/python -m pytest \
+  bridge/tests/test_openclaw_three_terminal_existing_stack_e2e.py -q
+```
+
 ## Common Gotchas
 
 - If `curl http://127.0.0.1:11434/api/tags` fails on the remote machine, the SSH reverse tunnel is not working.

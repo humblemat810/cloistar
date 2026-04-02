@@ -51,8 +51,11 @@ def assert_subset(test_case: unittest.TestCase, expected: Any, actual: Any) -> N
 
 
 class BridgeContractTests(unittest.TestCase):
-    def setUp(self) -> None:
+    @classmethod
+    def setUpClass(cls) -> None:
         reset_governance_runtime_host()
+
+    def setUp(self) -> None:
         store.reset()
         self.client = TestClient(app)
 
@@ -153,6 +156,18 @@ class BridgeContractTests(unittest.TestCase):
             True,
         )
         self.assertTrue(snapshot["approvals"][payload["approvalId"]]["suspendedTokenId"])
+        self.assertIn(
+            "proposalNodeId",
+            snapshot["approvals"][payload["approvalId"]]["runtimeProjection"],
+        )
+        self.assertIn(
+            "decisionNodeId",
+            snapshot["approvals"][payload["approvalId"]]["runtimeProjection"],
+        )
+        self.assertIn(
+            "approvalNodeId",
+            snapshot["approvals"][payload["approvalId"]]["runtimeProjection"],
+        )
 
     def test_gateway_plugin_approval_request_links_real_gateway_id_to_bridge_approval(self) -> None:
         raw = load_fixture("openclaw", "before_tool_call.require_approval.json")
@@ -281,6 +296,9 @@ class BridgeContractTests(unittest.TestCase):
         self.assertEqual(snapshot["workflowRuns"][governance_call_id]["status"], "succeeded")
         self.assertEqual(snapshot["workflowRuns"][governance_call_id]["finalDisposition"], "allow")
         self.assertIn("resolutionNodeId", snapshot["governanceProjection"][governance_call_id])
+        self.assertIn("proposalNodeId", snapshot["governanceProjection"][governance_call_id])
+        self.assertIn("decisionNodeId", snapshot["governanceProjection"][governance_call_id])
+        self.assertIn("approvalNodeId", snapshot["governanceProjection"][governance_call_id])
 
     def test_after_tool_call_updates_governance_projection_completion_state(self) -> None:
         before_raw = load_fixture("openclaw", "before_tool_call.require_approval.json")

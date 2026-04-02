@@ -80,6 +80,9 @@ def build_governance_workflow_design(
 ) -> WorkflowDesignArtifact:
     wid = lambda suffix: f"wf|{workflow_id}|{suffix}"
 
+    # The approval branch is intentionally modeled as a suspend/resume loop:
+    # the workflow pauses at "approval" and waits for an external resolution
+    # event to re-enter the run and continue toward grant or deny.
     nodes = [
         _node(
             workflow_id=workflow_id,
