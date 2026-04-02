@@ -14,7 +14,7 @@ come from metadata, deterministic ids, and backbone/link relations.
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, Sequence, TypeAlias, overload
 
 from ..domain.governance_models import (
     ApprovalRow,
@@ -40,6 +40,7 @@ STORE_DOC_IDS = {
 }
 BACKBONE_DOC_ID = "gov-store:backbone"
 STORE_RESET_DOC_IDS = list(STORE_DOC_IDS.values()) + [BACKBONE_DOC_ID]
+_SERVICE_CACHE: dict[tuple[int, int | None], "GovernanceService"] = {}
 RowKind: TypeAlias = Literal[
     "event",
     "receipt",
@@ -60,6 +61,13 @@ DurableGovernanceRow: TypeAlias = (
     | GovernanceProjectionRow
     | ApprovalSubscriptionStatusRow
 )
+StructuredRowKind: TypeAlias = Literal[
+    "approval",
+    "gateway_approval",
+    "workflow_run",
+    "projection",
+    "approval_subscription",
+]
 
 
 class GraphWritePort(Protocol):
@@ -94,12 +102,8 @@ class GovernanceService:
         workflow_engine: GraphEnginePort | None = None,
     ) -> "GovernanceService":
         """Return a cached service instance for one engine pair."""
-        cache = getattr(conversation_engine, "_governance_service_cache", None)
-        if cache is None:
-            cache = {}
-            conversation_engine._governance_service_cache = cache
-        key = id(workflow_engine)
-        service = cache.get(key)
+        cache_key = (id(conversation_engine), id(workflow_engine) if workflow_engine is not None else None)
+        service = _SERVICE_CACHE.get(cache_key)
         if service is not None:
             return service
         persist_root = None
@@ -113,7 +117,7 @@ class GovernanceService:
             workflow_engine=workflow_engine,
             store_dir=store_dir,
         )
-        cache[key] = service
+        _SERVICE_CACHE[cache_key] = service
         return service
 
     def reset_store(self) -> None:
@@ -174,7 +178,7 @@ class GovernanceService:
 
     def upsert_approval_row(self, approval_id: str, payload: ApprovalRow) -> ApprovalRow:
         """Persist one approval summary row with stable identity."""
-        row: ApprovalRow = dict(payload)
+        row: ApprovalRow = payload
         row["approvalRequestId"] = approval_id
         self._persist_row(
             row_kind="approval",
@@ -200,7 +204,7 @@ class GovernanceService:
         payload: GatewayApprovalRow,
     ) -> GatewayApprovalRow:
         """Persist one gateway approval row with stable identity."""
-        row: GatewayApprovalRow = dict(payload)
+        row: GatewayApprovalRow = payload
         row["gatewayApprovalId"] = gateway_approval_id
         request = row.get("request")
         request_data = request if isinstance(request, dict) else {}
@@ -227,7 +231,7 @@ class GovernanceService:
         payload: WorkflowRunRow,
     ) -> WorkflowRunRow:
         """Persist a workflow-run summary row keyed by governance call id."""
-        row: WorkflowRunRow = dict(payload)
+        row: WorkflowRunRow = payload
         row["governanceCallId"] = governance_call_id
         self._persist_row(
             row_kind="workflow_run",
@@ -253,7 +257,7 @@ class GovernanceService:
         payload: GovernanceProjectionRow,
     ) -> GovernanceProjectionRow:
         """Persist a governance projection row keyed by governance call id."""
-        row: GovernanceProjectionRow = dict(payload)
+        row: GovernanceProjectionRow = payload
         row["governanceCallId"] = governance_call_id
         self._persist_row(
             row_kind="projection",
@@ -278,7 +282,7 @@ class GovernanceService:
         payload: ApprovalSubscriptionStatusRow,
     ) -> ApprovalSubscriptionStatusRow:
         """Persist the latest approval-listener subscription status."""
-        row: ApprovalSubscriptionStatusRow = dict(payload)
+        row: ApprovalSubscriptionStatusRow = payload
         self._persist_row(
             row_kind="approval_subscription",
             row_id="latest",
@@ -295,6 +299,31 @@ class GovernanceService:
         )
         return row
 
+    @overload
+    def get_row(self, row_kind: Literal["event"], row_id: str) -> CanonicalGovernanceEventRow | None: ...
+
+    @overload
+    def get_row(self, row_kind: Literal["receipt"], row_id: str) -> IntegrationReceiptRow | None: ...
+
+    @overload
+    def get_row(self, row_kind: Literal["approval"], row_id: str) -> ApprovalRow | None: ...
+
+    @overload
+    def get_row(self, row_kind: Literal["gateway_approval"], row_id: str) -> GatewayApprovalRow | None: ...
+
+    @overload
+    def get_row(self, row_kind: Literal["workflow_run"], row_id: str) -> WorkflowRunRow | None: ...
+
+    @overload
+    def get_row(self, row_kind: Literal["projection"], row_id: str) -> GovernanceProjectionRow | None: ...
+
+    @overload
+    def get_row(
+        self,
+        row_kind: Literal["approval_subscription"],
+        row_id: str,
+    ) -> ApprovalSubscriptionStatusRow | None: ...
+
     def get_row(self, row_kind: RowKind, row_id: str) -> DurableGovernanceRow | None:
         """Return one persisted row payload by kind and stable row id."""
         rows = self._load_rows(row_kind)
@@ -306,7 +335,28 @@ class GovernanceService:
                 return dict(row)
         return None
 
-    def list_rows(self, row_kind: RowKind) -> list[DurableGovernanceRow]:
+    @overload
+    def list_rows(self, row_kind: Literal["event"]) -> list[CanonicalGovernanceEventRow]: ...
+
+    @overload
+    def list_rows(self, row_kind: Literal["receipt"]) -> list[IntegrationReceiptRow]: ...
+
+    @overload
+    def list_rows(self, row_kind: Literal["approval"]) -> list[ApprovalRow]: ...
+
+    @overload
+    def list_rows(self, row_kind: Literal["gateway_approval"]) -> list[GatewayApprovalRow]: ...
+
+    @overload
+    def list_rows(self, row_kind: Literal["workflow_run"]) -> list[WorkflowRunRow]: ...
+
+    @overload
+    def list_rows(self, row_kind: Literal["projection"]) -> list[GovernanceProjectionRow]: ...
+
+    @overload
+    def list_rows(self, row_kind: Literal["approval_subscription"]) -> list[ApprovalSubscriptionStatusRow]: ...
+
+    def list_rows(self, row_kind: RowKind) -> Sequence[DurableGovernanceRow]:
         """Return all persisted rows for one logical row kind."""
         rows = self._load_rows(row_kind)
         if row_kind == "approval_subscription":
@@ -323,26 +373,30 @@ class GovernanceService:
         """Build the bridge debug-state shape from durable row nodes."""
         events = self._sorted_rows(self.list_rows("event"), keys=("recordedAt", "occurredAt", "eventId"))
         receipts = self._sorted_rows(self.list_rows("receipt"), keys=("receivedAt", "receiptId"))
-        approvals = {
-            row["approvalRequestId"]: row
-            for row in self.list_rows("approval")
-            if isinstance(row.get("approvalRequestId"), str)
-        }
-        gateway_approvals = {
-            row["gatewayApprovalId"]: row
-            for row in self.list_rows("gateway_approval")
-            if isinstance(row.get("gatewayApprovalId"), str)
-        }
-        workflow_runs = {
-            row["governanceCallId"]: row
-            for row in self.list_rows("workflow_run")
-            if isinstance(row.get("governanceCallId"), str)
-        }
-        governance_projection = {
-            row["governanceCallId"]: row
-            for row in self.list_rows("projection")
-            if isinstance(row.get("governanceCallId"), str)
-        }
+        approvals: dict[str, ApprovalRow] = {}
+        for row in self.list_rows("approval"):
+            approval_request_id = row.get("approvalRequestId")
+            if isinstance(approval_request_id, str):
+                approvals[approval_request_id] = row
+
+        gateway_approvals: dict[str, GatewayApprovalRow] = {}
+        for row in self.list_rows("gateway_approval"):
+            gateway_approval_id = row.get("gatewayApprovalId")
+            if isinstance(gateway_approval_id, str):
+                gateway_approvals[gateway_approval_id] = row
+
+        workflow_runs: dict[str, WorkflowRunRow] = {}
+        for row in self.list_rows("workflow_run"):
+            governance_call_id = row.get("governanceCallId")
+            if isinstance(governance_call_id, str):
+                workflow_runs[governance_call_id] = row
+
+        governance_projection: dict[str, GovernanceProjectionRow] = {}
+        for row in self.list_rows("projection"):
+            governance_call_id = row.get("governanceCallId")
+            if isinstance(governance_call_id, str):
+                governance_projection[governance_call_id] = row
+
         subscription_rows = self.list_rows("approval_subscription")
         approval_subscription = subscription_rows[-1] if subscription_rows else {
             "enabled": False,
@@ -399,7 +453,7 @@ class GovernanceService:
 
     @staticmethod
     def _sorted_rows(
-        rows: list[CanonicalGovernanceEventRow] | list[IntegrationReceiptRow],
+        rows: Sequence[CanonicalGovernanceEventRow] | Sequence[IntegrationReceiptRow],
         *,
         keys: tuple[str, ...],
     ) -> list[dict[str, Any]]:
@@ -450,10 +504,19 @@ class GovernanceService:
             "approval_subscription": "kind",
         }.get(row_kind, "id")
 
+    @overload
+    def _load_rows(self, row_kind: Literal["event"]) -> list[CanonicalGovernanceEventRow]: ...
+
+    @overload
+    def _load_rows(self, row_kind: Literal["receipt"]) -> list[IntegrationReceiptRow]: ...
+
+    @overload
+    def _load_rows(self, row_kind: StructuredRowKind) -> dict[str, DurableGovernanceRow]: ...
+
     def _load_rows(
         self,
         row_kind: RowKind,
-    ) -> list[CanonicalGovernanceEventRow] | dict[str, DurableGovernanceRow]:
+    ) -> list[CanonicalGovernanceEventRow] | list[IntegrationReceiptRow] | dict[str, DurableGovernanceRow]:
         """Load one durable row collection from JSON on disk."""
         path = self._row_file_paths()[row_kind]
         if not path.exists():

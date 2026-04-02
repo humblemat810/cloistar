@@ -8,7 +8,7 @@ graph state rather than Python process memory.
 """
 
 from dataclasses import dataclass
-from typing import Any, TypedDict
+from typing import Any, TypeVar, TypedDict
 
 from .domain.governance_models import (
     ApprovalRuntimeAttachmentRow,
@@ -35,6 +35,9 @@ class PartialApprovalSubscriptionStatusRow(TypedDict, total=False):
     lastRequestedEventAt: int | None
     lastResolvedEventAt: int | None
     lastStatusAt: int | None
+
+
+TGatewayApprovalRow = TypeVar("TGatewayApprovalRow", bound=GatewayApprovalRow)
 
 
 @dataclass
@@ -104,7 +107,7 @@ class PersistentGovernanceStore:
             "expiresAtMs": payload.get("expiresAtMs"),
         }
         row = self._service().upsert_gateway_approval_row(gateway_approval_id, row)
-        self._attach_bridge_approval(row)
+        row = self._attach_bridge_approval(row)
         self.update_approval_subscription_status(
             {
                 "lastRequestedEventAt": payload.get("createdAtMs"),
@@ -121,21 +124,31 @@ class PersistentGovernanceStore:
         gateway_approval_id = self._normalize_gateway_approval_id(payload.get("id"))
         if gateway_approval_id is None:
             return None
-        existing = self._service().get_row("gateway_approval", gateway_approval_id) or {}
+        existing = self._service().get_row("gateway_approval", gateway_approval_id)
         request = payload.get("request")
         request_data: GatewayApprovalRequestRef = request if isinstance(request, dict) else {}
         row: GatewayApprovalRow = {
             "gatewayApprovalId": gateway_approval_id,
             "kind": kind,
             "status": payload.get("decision") or "resolved",
-            "request": dict(request_data) if request_data else existing.get("request") or {},
+            "request": (
+                dict(request_data)
+                if request_data
+                else dict(existing["request"])
+                if existing is not None and "request" in existing
+                else {}
+            ),
             "decision": payload.get("decision"),
             "resolvedBy": payload.get("resolvedBy"),
             "ts": payload.get("ts"),
-            "bridgeApprovalId": existing.get("bridgeApprovalId"),
+            "bridgeApprovalId": (
+                existing["bridgeApprovalId"]
+                if existing is not None and "bridgeApprovalId" in existing
+                else None
+            ),
         }
         row = self._service().upsert_gateway_approval_row(gateway_approval_id, row)
-        self._attach_bridge_approval(row)
+        row = self._attach_bridge_approval(row)
         self.update_approval_subscription_status(
             {
                 "lastResolvedEventAt": payload.get("ts"),
@@ -268,13 +281,13 @@ class PersistentGovernanceStore:
             break
         return dict(approval_row)
 
-    def _attach_bridge_approval(self, gateway_row: GatewayApprovalRow) -> None:
+    def _attach_bridge_approval(self, gateway_row: TGatewayApprovalRow) -> TGatewayApprovalRow:
         request = gateway_row.get("request")
         if not isinstance(request, dict):
-            return
+            return gateway_row
         tool_call_id = request.get("toolCallId")
         if not isinstance(tool_call_id, str) or not tool_call_id:
-            return
+            return gateway_row
         for approval_row in self._service().list_rows("approval"):
             if approval_row.get("toolCallId") != tool_call_id:
                 continue
@@ -282,7 +295,8 @@ class PersistentGovernanceStore:
             self._service().upsert_approval_row(approval_row["approvalRequestId"], approval_row)
             gateway_row["bridgeApprovalId"] = approval_row["approvalRequestId"]
             self._service().upsert_gateway_approval_row(gateway_row["gatewayApprovalId"], gateway_row)
-            return
+            return gateway_row
+        return gateway_row
 
 
 store = PersistentGovernanceStore()

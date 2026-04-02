@@ -5,14 +5,21 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from kogwistar.engine_core.engine import GraphKnowledgeEngine
 from kogwistar.runtime.models import RunSuccess
 from kogwistar.runtime.runtime import WorkflowRuntime
 
-from ..domain.governance_models import PolicyEvaluation, ToolCallCompletedEvent, ToolCallObservedEvent
+from ..domain.governance_models import (
+    ApprovalRow,
+    GovernanceProjectionRow,
+    PolicyEvaluation,
+    ToolCallCompletedEvent,
+    ToolCallObservedEvent,
+    WorkflowRunRow,
+)
 from .governance_design import GOVERNANCE_WORKFLOW_ID, ensure_governance_workflow_design
 from .governance_graph import governance_edge, governance_node
 from .governance_resolvers import governance_resolver
@@ -25,14 +32,14 @@ def _zero_embeddings(texts: list[str]) -> list[list[float]]:
 @dataclass
 class GovernanceRuntimeDecision:
     evaluation: PolicyEvaluation
-    workflow: dict[str, Any]
-    projection: dict[str, Any]
+    workflow: WorkflowRunRow
+    projection: GovernanceProjectionRow
 
 
 @dataclass
 class GovernanceRuntimeResume:
-    workflow: dict[str, Any]
-    projection: dict[str, Any]
+    workflow: WorkflowRunRow
+    projection: GovernanceProjectionRow
 
 
 class GovernanceRuntimeHost:
@@ -120,7 +127,7 @@ class GovernanceRuntimeHost:
 
     def resume_approval(
         self,
-        approval_row: dict[str, Any],
+        approval_row: ApprovalRow,
         *,
         resolution: str,
         resolved_at: str | None,
@@ -132,10 +139,19 @@ class GovernanceRuntimeHost:
         conversation_id = approval_row.get("runtimeConversationId")
         turn_node_id = approval_row.get("runtimeTurnNodeId")
         governance_call_id = approval_row.get("governanceCallId")
-        if not all(
-            isinstance(value, str) and value
-            for value in (run_id, suspended_node_id, suspended_token_id, workflow_id, conversation_id, turn_node_id)
-        ):
+        if not isinstance(run_id, str) or not run_id:
+            return None
+        if not isinstance(suspended_node_id, str) or not suspended_node_id:
+            return None
+        if not isinstance(suspended_token_id, str) or not suspended_token_id:
+            return None
+        if not isinstance(workflow_id, str) or not workflow_id:
+            return None
+        if not isinstance(conversation_id, str) or not conversation_id:
+            return None
+        if not isinstance(turn_node_id, str) or not turn_node_id:
+            return None
+        if not isinstance(governance_call_id, str) or not governance_call_id:
             return None
 
         next_step = "record_approval_granted"
@@ -165,25 +181,34 @@ class GovernanceRuntimeHost:
             conversation_id=conversation_id,
             turn_node_id=turn_node_id,
         )
-        projection = self._merge_projection(
+        projection = cast(
+            GovernanceProjectionRow,
+            self._merge_projection(
             approval_row.get("runtimeProjection"),
             self._projection_from_state(result.final_state),
+            ),
         )
-        projection = self._record_resolution_projection(
+        projection = cast(
+            GovernanceProjectionRow,
+            self._record_resolution_projection(
             projection=projection,
             workflow_id=workflow_id,
             run_id=run_id,
             governance_call_id=governance_call_id,
             resolution=resolution,
             resolved_at=resolved_at,
+            ),
         )
-        workflow = self._workflow_snapshot(
+        workflow = cast(
+            WorkflowRunRow,
+            self._workflow_snapshot(
             governance_call_id=governance_call_id,
             run_id=run_id,
             conversation_id=conversation_id,
             turn_node_id=turn_node_id,
             final_state=result.final_state,
             status=result.status,
+            ),
         )
         workflow["approvalResolution"] = resolution
         workflow["projection"] = dict(projection)
@@ -197,12 +222,12 @@ class GovernanceRuntimeHost:
         governance_call_id: str,
         *,
         completed_event: ToolCallCompletedEvent,
-        workflow_run: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
+        workflow_run: WorkflowRunRow | None,
+    ) -> GovernanceProjectionRow | None:
         if workflow_run is None:
             return None
 
-        projection = dict(workflow_run.get("projection") or {})
+        projection = cast(GovernanceProjectionRow, dict(workflow_run.get("projection") or {}))
         source_id = projection.get("resolutionNodeId") or projection.get("approvalNodeId") or projection.get("decisionNodeId") or projection.get("proposalNodeId")
         completion_node_id = f"gov|{workflow_run.get('runId', governance_call_id)}|completion|{completed_event.eventId}"
         outcome = completed_event.data.outcome
@@ -244,28 +269,28 @@ class GovernanceRuntimeHost:
         return projection
 
     @staticmethod
-    def _projection_from_state(state: dict[str, Any]) -> dict[str, Any]:
+    def _projection_from_state(state: dict[str, Any]) -> GovernanceProjectionRow:
         projection = state.get("governance_projection")
-        return dict(projection) if isinstance(projection, dict) else {}
+        return cast(GovernanceProjectionRow, dict(projection) if isinstance(projection, dict) else {})
 
     @staticmethod
-    def _merge_projection(*parts: Any) -> dict[str, Any]:
+    def _merge_projection(*parts: Any) -> GovernanceProjectionRow:
         merged: dict[str, Any] = {}
         for part in parts:
             if isinstance(part, dict):
                 merged.update(part)
-        return merged
+        return cast(GovernanceProjectionRow, merged)
 
     def _record_resolution_projection(
         self,
         *,
-        projection: dict[str, Any],
+        projection: GovernanceProjectionRow,
         workflow_id: str,
         run_id: str,
         governance_call_id: str | None,
         resolution: str,
         resolved_at: str | None,
-    ) -> dict[str, Any]:
+    ) -> GovernanceProjectionRow:
         if not isinstance(governance_call_id, str) or not governance_call_id:
             return projection
 
@@ -320,7 +345,7 @@ class GovernanceRuntimeHost:
         turn_node_id: str,
         final_state: dict[str, Any],
         status: str,
-    ) -> dict[str, Any]:
+    ) -> WorkflowRunRow:
         suspended_node_id = None
         suspended_token_id = None
         rt_join = final_state.get("_rt_join")
