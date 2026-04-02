@@ -17,6 +17,7 @@ Use [run-openclaw-gateway-governance-e2e.sh](/home/azureuser/cloistar/scripts/ru
 - creates an isolated OpenClaw config/state/workspace
 - installs and enables the local governance plugin in that isolated OpenClaw state
 - starts the repo-local OpenClaw gateway
+- can start the bridge under a demo-only approval probe
 - prints the exact config path, log paths, and bridge debug URL to inspect
 - shuts down cleanly on `Ctrl-C` while keeping all artifacts on disk
 
@@ -75,6 +76,24 @@ This is the fastest way to see the stack do real work. The helper will:
 - auto-run one agent turn
 - print the agent output in your terminal
 - keep the bridge and gateway alive so you can inspect logs and bridge state
+
+If you also want a dedicated approval-only NDJSON trace for demos, start the helper with `--demo-probe`:
+
+```bash
+bash scripts/run-openclaw-gateway-governance-e2e.sh \
+  --stable-run-dir \
+  --demo-probe \
+  --ollama-model qwen3:4b \
+  --demo-case approval
+```
+
+That writes a demo-focused trace file at:
+
+```bash
+/home/azureuser/cloistar/.tmp/openclaw-gateway-e2e/current/logs/demo-approval-trace.jsonl
+```
+
+The demo probe is bridge-only and opt-in. It does not change normal bridge behavior when `--demo-probe` is omitted.
 
 ### Recommended For Pairing And Approval Work
 

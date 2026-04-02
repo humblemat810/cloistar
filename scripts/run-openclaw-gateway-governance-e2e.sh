@@ -52,6 +52,7 @@ SKIP_PLUGIN_BUILD=0
 SKIP_PLUGIN_INSTALL=0
 WAIT_FOREVER=1
 GATEWAY_VERBOSE=1
+DEMO_PROBE=0
 
 usage() {
   cat <<'EOF'
@@ -70,6 +71,7 @@ Options:
   --ollama-api-key VALUE      Placeholder auth value for Ollama. Default: ollama-local
   --plugin-inspect-timeout D  Timeout for best-effort 'plugins inspect'. Default: \$PLUGIN_INSPECT_TIMEOUT or 20s
   --demo-case NAME            Auto-run a demo agent turn: allow | block | approval
+  --demo-probe               Start the bridge through the demo approval probe launcher.
   --message TEXT              Optional OpenClaw agent message to run after startup.
   --session-id ID             Session id to use with --message. Default: governance-e2e
   --skip-plugin-build         Reuse the existing plugin dist/ output.
@@ -83,6 +85,7 @@ Examples:
   ./scripts/run-openclaw-gateway-governance-e2e.sh --stable-run-dir --ollama-model qwen3:4b
   ./scripts/run-openclaw-gateway-governance-e2e.sh --ollama-model glm-4.7-flash
   ./scripts/run-openclaw-gateway-governance-e2e.sh --ollama-model qwen3:4b --demo-case approval
+  ./scripts/run-openclaw-gateway-governance-e2e.sh --stable-run-dir --demo-probe --demo-case approval
   PLUGIN_INSPECT_TIMEOUT=5s ./scripts/run-openclaw-gateway-governance-e2e.sh --plugin-inspect-timeout 10s
   ./scripts/run-openclaw-gateway-governance-e2e.sh --message "Use the read tool (not exec) to read proof.txt and reply with the exact contents only."
   ./scripts/run-openclaw-gateway-governance-e2e.sh --use-existing-bridge --bridge-url http://127.0.0.1:8788
@@ -213,6 +216,10 @@ while [[ $# -gt 0 ]]; do
       DEMO_CASE="${2:-}"
       shift 2
       ;;
+    --demo-probe)
+      DEMO_PROBE=1
+      shift
+      ;;
     --message)
       MESSAGE="${2:-}"
       shift 2
@@ -323,6 +330,7 @@ GATEWAY_STDOUT_LOG="$RUN_DIR/logs/gateway.stdout.log"
 GATEWAY_STDERR_LOG="$RUN_DIR/logs/gateway.stderr.log"
 OPENCLAW_FILE_LOG="$RUN_DIR/logs/openclaw.jsonl"
 AGENT_OUTPUT_JSON="$RUN_DIR/agent-output.json"
+DEMO_APPROVAL_TRACE_LOG="$RUN_DIR/logs/demo-approval-trace.jsonl"
 
 if [[ -z "$BRIDGE_PORT" ]]; then
   BRIDGE_PORT="$(pick_free_port)"
@@ -478,6 +486,7 @@ Run artifacts were kept at:
 Most useful evidence files:
   bridge stdout:  $BRIDGE_STDOUT_LOG
   bridge stderr:  $BRIDGE_STDERR_LOG
+  demo trace:     $DEMO_APPROVAL_TRACE_LOG
   gateway stdout: $GATEWAY_STDOUT_LOG
   gateway stderr: $GATEWAY_STDERR_LOG
   OpenClaw JSONL: $OPENCLAW_FILE_LOG
@@ -506,18 +515,35 @@ if [[ "$USE_EXISTING_BRIDGE" == "1" ]]; then
   fi
 else
   log_step "Starting local bridge at $BRIDGE_URL"
-  env \
-    BRIDGE_URL="$BRIDGE_URL" \
-    APPROVAL_TIMEOUT_MS="${APPROVAL_TIMEOUT_MS:-600000}" \
-    OPENCLAW_APPROVAL_EVENT_SUBSCRIPTION=1 \
-    OPENCLAW_NODE_BIN="$NODE_BIN" \
-    OPENCLAW_CONFIG_PATH="$CONFIG_PATH" \
-    OPENCLAW_STATE_DIR="$STATE_DIR" \
-    OPENCLAW_HOME="$HOME_DIR" \
-    HOME="$HOME_DIR" \
-    PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-    "$BRIDGE_PYTHON" -m uvicorn bridge.app.main:app --host 127.0.0.1 --port "$BRIDGE_PORT" \
-    >"$BRIDGE_STDOUT_LOG" 2>"$BRIDGE_STDERR_LOG" &
+  if [[ "$DEMO_PROBE" == "1" ]]; then
+    env \
+      BRIDGE_URL="$BRIDGE_URL" \
+      APPROVAL_TIMEOUT_MS="${APPROVAL_TIMEOUT_MS:-600000}" \
+      OPENCLAW_APPROVAL_EVENT_SUBSCRIPTION=1 \
+      OPENCLAW_NODE_BIN="$NODE_BIN" \
+      OPENCLAW_CONFIG_PATH="$CONFIG_PATH" \
+      OPENCLAW_STATE_DIR="$STATE_DIR" \
+      OPENCLAW_HOME="$HOME_DIR" \
+      HOME="$HOME_DIR" \
+      PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+      DEMO_APPROVAL_PROBE=1 \
+      DEMO_APPROVAL_TRACE_FILE="$DEMO_APPROVAL_TRACE_LOG" \
+      "$BRIDGE_PYTHON" -m bridge.app.demo.launch_bridge_with_probe --host 127.0.0.1 --port "$BRIDGE_PORT" \
+      >"$BRIDGE_STDOUT_LOG" 2>"$BRIDGE_STDERR_LOG" &
+  else
+    env \
+      BRIDGE_URL="$BRIDGE_URL" \
+      APPROVAL_TIMEOUT_MS="${APPROVAL_TIMEOUT_MS:-600000}" \
+      OPENCLAW_APPROVAL_EVENT_SUBSCRIPTION=1 \
+      OPENCLAW_NODE_BIN="$NODE_BIN" \
+      OPENCLAW_CONFIG_PATH="$CONFIG_PATH" \
+      OPENCLAW_STATE_DIR="$STATE_DIR" \
+      OPENCLAW_HOME="$HOME_DIR" \
+      HOME="$HOME_DIR" \
+      PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+      "$BRIDGE_PYTHON" -m uvicorn bridge.app.main:app --host 127.0.0.1 --port "$BRIDGE_PORT" \
+      >"$BRIDGE_STDOUT_LOG" 2>"$BRIDGE_STDERR_LOG" &
+  fi
   BRIDGE_PID="$!"
 
   if ! wait_for_http_ok "$BRIDGE_URL/healthz" 20; then
@@ -615,6 +641,7 @@ Evidence files:
   plugin inspect: $PLUGIN_INSPECT_LOG
   bridge stdout:  $BRIDGE_STDOUT_LOG
   bridge stderr:  $BRIDGE_STDERR_LOG
+  demo trace:     $DEMO_APPROVAL_TRACE_LOG
   gateway stdout: $GATEWAY_STDOUT_LOG
   gateway stderr: $GATEWAY_STDERR_LOG
   OpenClaw JSONL: $OPENCLAW_FILE_LOG
