@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -340,6 +342,40 @@ class BridgeContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "approval not found")
+
+    def test_require_approval_persists_across_runtime_host_restart(self) -> None:
+        previous = os.environ.get("KOGWISTAR_RUNTIME_DATA_DIR")
+        with tempfile.TemporaryDirectory(prefix="bridge-persist-") as temp_dir:
+            os.environ["KOGWISTAR_RUNTIME_DATA_DIR"] = temp_dir
+            reset_governance_runtime_host()
+            store.reset()
+            client = TestClient(app)
+
+            before_raw = load_fixture("openclaw", "before_tool_call.require_approval.json")
+            decision_response = client.post("/policy/before-tool-call", json=before_raw)
+            approval_id = decision_response.json()["approvalId"]
+            snapshot_before = store.snapshot()
+
+            reset_governance_runtime_host()
+            snapshot_after_restart = store.snapshot()
+            self.assertIn(approval_id, snapshot_after_restart["approvals"])
+            self.assertEqual(
+                [event["eventType"] for event in snapshot_after_restart["events"]],
+                [event["eventType"] for event in snapshot_before["events"]],
+            )
+
+            resolution_raw = deepcopy(load_fixture("openclaw", "approval_resolution.allow_once.json"))
+            resolution_raw["approvalId"] = approval_id
+            resolution_response = client.post("/approval/resolution", json=resolution_raw)
+
+            self.assertEqual(resolution_response.status_code, 200)
+            self.assertEqual(store.snapshot()["approvals"][approval_id]["status"], "allow_once")
+
+        if previous is None:
+            os.environ.pop("KOGWISTAR_RUNTIME_DATA_DIR", None)
+        else:
+            os.environ["KOGWISTAR_RUNTIME_DATA_DIR"] = previous
+        reset_governance_runtime_host()
 
 
 if __name__ == "__main__":

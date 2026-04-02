@@ -7,19 +7,19 @@ from .governance_models import (
     ExecutionDeniedEvent,
     ExecutionResumedEvent,
 )
-from ..store import InMemoryStore
+from typing import Any
 
 
-def append_event(store: InMemoryStore, event: CanonicalGovernanceEvent) -> dict:
+def append_event(store: Any, event: CanonicalGovernanceEvent) -> dict:
     return store.append_canonical_event(event)
 
 
-def register_approval_request(store: InMemoryStore, event: ApprovalRequestedEvent, suspension_id: str) -> dict:
+def register_approval_request(store: Any, event: ApprovalRequestedEvent, suspension_id: str) -> dict:
     return store.register_approval_request(event, suspension_id)
 
 
 def append_approval_resolution(
-    store: InMemoryStore,
+    store: Any,
     resolved_event: ApprovalResolvedEvent,
     follow_up_event: ExecutionResumedEvent | ExecutionDeniedEvent,
 ) -> dict | None:

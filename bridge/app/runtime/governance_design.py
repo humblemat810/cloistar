@@ -193,7 +193,7 @@ def build_governance_workflow_design(
 
 
 def ensure_governance_workflow_design(workflow_engine, *, workflow_id: str = GOVERNANCE_WORKFLOW_ID) -> None:
-    existing = workflow_engine.get_nodes(
+    existing = workflow_engine.read.get_nodes(
         where={"$and": [{"entity_type": "workflow_node"}, {"workflow_id": workflow_id}]},
         limit=1000,
     )

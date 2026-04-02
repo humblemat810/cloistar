@@ -14,6 +14,7 @@ The intent is to keep OpenClaw focused on execution while Kogwistar owns:
 - [Architecture](./architecture.md) - current dev topology and integration seam
 - [Dev Debug Cycle](./dev-debug-cycle.md) - the host/plugin/bridge iteration loop
 - [ARD](./ARD.md) - roadmap for correctness, observability, tests, and hardening
+- [Persistence ARD](./ARD-persistence.md) - roadmap for moving bridge governance state from in-memory projection toward durable Kogwistar-backed persistence
 - [Kogwistar Integration Guide](./kogwistar-integration-guide.md) - how the bridge should host Kogwistar runtime, resolvers, and persistence
 - [OpenClaw plugin manifest](./plugin/openclaw.plugin.json) - native plugin metadata
 - [OpenClaw plugin entry](./plugin/src/index.ts) - hook wiring and governance calls

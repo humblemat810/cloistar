@@ -31,11 +31,13 @@ from .governance_runtime import (
     get_governance_runtime_host,
     reset_governance_runtime_host,
 )
+from .governance_service import GovernanceService
 
 __all__ = [
     "GovernanceRuntimeDecision",
     "GovernanceRuntimeHost",
     "GovernanceRuntimeResume",
+    "GovernanceService",
     "get_governance_runtime_host",
     "reset_governance_runtime_host",
 ]

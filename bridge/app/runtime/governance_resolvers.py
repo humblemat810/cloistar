@@ -169,12 +169,15 @@ def load_prior_context(ctx):
     store = deps.get("store")
     matching_count = 0
     if store is not None:
-        snapshot = store.snapshot()
-        matching_count = sum(
-            1
-            for approval in snapshot.get("approvals", {}).values()
-            if approval.get("toolName") == _tool_name(ctx)
-        )
+        if hasattr(store, "count_matching_approvals"):
+            matching_count = int(store.count_matching_approvals(_tool_name(ctx)))
+        else:
+            snapshot = store.snapshot()
+            matching_count = sum(
+                1
+                for approval in snapshot.get("approvals", {}).values()
+                if approval.get("toolName") == _tool_name(ctx)
+            )
     return RunSuccess(
         conversation_node_id=None,
         state_update=[
