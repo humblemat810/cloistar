@@ -6,12 +6,16 @@ For the fastest runnable setup on this repo, especially when you want to reverse
 
 ## What We Have Proven
 
-The bridge and plugin contract are working together in a live local harness.
+The bridge and plugin contract are working together in a live local harness,
+and the bridge now runs a real Kogwistar-hosted governance runtime in the
+active dev path.
 
 - The plugin builds and its contract helpers behave as expected in [plugin/test/governance-contract.test.js](/home/azureuser/cloistar/plugin/test/governance-contract.test.js#L63).
 - The plugin sends `before_tool_call`, `after_tool_call`, and approval-resolution payloads to the bridge in the expected shape in [plugin/src/index.ts](/home/azureuser/cloistar/plugin/src/index.ts#L42) and [plugin/src/governance-contract.ts](/home/azureuser/cloistar/plugin/src/governance-contract.ts#L48).
 - The bridge accepts those payloads and returns `allow`, `block`, and `requireApproval` decisions in [bridge/app/main.py](/home/azureuser/cloistar/bridge/app/main.py#L41).
 - The bridge canonicalizes and stores approval resolution state in [bridge/app/integrations/openclaw_mapper.py](/home/azureuser/cloistar/bridge/app/integrations/openclaw_mapper.py#L160) and [bridge/app/main.py](/home/azureuser/cloistar/bridge/app/main.py#L73).
+- The bridge now hosts a live Kogwistar workflow runtime in [governance_runtime.py](/home/azureuser/cloistar/bridge/app/runtime/governance_runtime.py), including native suspend/resume for `requireApproval`.
+- The bridge now persists operator-facing governance state through [governance_service.py](/home/azureuser/cloistar/bridge/app/runtime/governance_service.py) and the durable store facade in [store.py](/home/azureuser/cloistar/bridge/app/store.py).
 - The live harness proves the local plugin can talk to the live bridge and that the bridge records the expected event flow.
 
 Confirmed live scenarios:
@@ -23,23 +27,29 @@ Confirmed live scenarios:
 
 ## Kogwistar Reality Check
 
-This repo does not yet contain a real durable Kogwistar backend integration in the active dev path.
+This repo now contains real Kogwistar runtime integration in the active dev
+path, but the persistence model is still hybrid rather than the final
+graph-native design target.
 
 What is real today:
 
 - A real local OpenClaw checkout and plugin integration path.
 - A real FastAPI bridge process that receives OpenClaw-shaped hook payloads over HTTP.
 - Real bridge-side canonical event models and approval records.
-- Real in-memory event capture and approval state transitions.
+- A real Kogwistar `WorkflowRuntime` host for governance decisions and approval suspend/resume in [governance_runtime.py](/home/azureuser/cloistar/bridge/app/runtime/governance_runtime.py).
+- A real `GovernanceService` durable facade for operator-facing rows in [governance_service.py](/home/azureuser/cloistar/bridge/app/runtime/governance_service.py).
+- Durable bridge `/debug/state` materialization from that store facade in [store.py](/home/azureuser/cloistar/bridge/app/store.py).
 
-What is not yet real Kogwistar usage:
+What is not yet the final Kogwistar persistence shape:
 
-- No durable Kogwistar event append layer is wired in the active dev flow.
-- No real projection or replay backend is wired in the active dev flow.
-- No external Kogwistar service, database, or persistence boundary is being exercised.
-- The current bridge policy is a local scaffold policy, not a proven production Kogwistar policy engine.
+- The durable operator store is currently persisted under the runtime root as a bridge-owned JSON-backed read model, not yet rebuilt purely by querying graph artifacts.
+- The final graph-native projection/replay/read-model phase described in [ARD-persistence.md](/home/azureuser/cloistar/ARD-persistence.md) is not complete yet.
+- No external Kogwistar service boundary is being exercised; the runtime is embedded in the bridge process.
+- The current bridge policy is still a local governance policy implementation, not a proven production policy engine.
 
-The repo’s own architecture doc says this directly: the current bridge is a "placeholder event sink" and "durable Kogwistar storage, projections, and replay layers are future integration targets" in [architecture.md](/home/azureuser/cloistar/architecture.md#L3).
+The repo’s own architecture docs still point toward a richer persistent
+projection/replay layer later, but the active dev seam is no longer just a
+placeholder sink. It now includes a real runtime host and durable bridge state.
 
 ## Evidence
 
@@ -66,9 +76,11 @@ Relevant runtime contract evidence from OpenClaw upstream:
 Relevant local Kogwistar-scaffold evidence:
 
 - The bridge title and description identify it as a "Thin governance bridge between OpenClaw hooks and Kogwistar" in [main.py](/home/azureuser/cloistar/bridge/app/main.py#L21).
-- The bridge stores events and approvals only in an in-memory store in [store.py](/home/azureuser/cloistar/bridge/app/store.py#L11).
+- The bridge now uses a durable store facade in [store.py](/home/azureuser/cloistar/bridge/app/store.py#L1).
+- The bridge now has a live Kogwistar runtime host in [governance_runtime.py](/home/azureuser/cloistar/bridge/app/runtime/governance_runtime.py#L1).
+- The bridge now has a live governance persistence facade in [governance_service.py](/home/azureuser/cloistar/bridge/app/runtime/governance_service.py#L1).
 - The policy implementation is a simple local rule set based on dangerous tools and string markers in [policy.py](/home/azureuser/cloistar/bridge/app/policy.py#L13).
-- The canonical governance event schema is present, but it is still local bridge-side modeling, not proof of a live Kogwistar backend, in [governance_models.py](/home/azureuser/cloistar/bridge/app/domain/governance_models.py#L32).
+- The canonical governance event schema is present in [governance_models.py](/home/azureuser/cloistar/bridge/app/domain/governance_models.py#L32) and is now used by the live runtime/store path, even though the final graph-native persistent read model is still ahead.
 
 ## What Is Still Missing
 
@@ -81,12 +93,13 @@ Missing pieces:
 - Host-level evidence that OpenClaw itself pauses for approval and then resumes after `allow-once` or `allow-always`.
 - Live proof under the now-confirmed compatible OpenClaw runtime and provider setup. The original Node `18.19.1` concern was an environment-path mismatch in investigation, not the user’s actual interactive environment.
 
-Separately, if the goal is "real Kogwistar usage" rather than "real OpenClaw host usage", we are also still missing:
+Separately, if the goal is the full intended Kogwistar architecture rather than
+the now-live embedded runtime seam, we are still missing:
 
-- a real Kogwistar persistence layer
-- a real Kogwistar projection or replay path
+- a fully graph-native persistent read model for operator state
+- a richer projection/replay path over persisted graph artifacts
 - a real external Kogwistar service boundary under load
-- proof that bridge decisions come from real Kogwistar policy state instead of local scaffold rules
+- proof that bridge decisions come from richer long-lived Kogwistar policy state instead of the current local policy rules
 
 ## Important Contract Notes
 
@@ -133,10 +146,15 @@ node /home/azureuser/cloistar/scripts/manual-governance-smoke.mjs
 
 ## Bottom Line
 
-The plugin and bridge are working together correctly, and the bridge records the expected policy and approval state. But that bridge is still a Kogwistar-shaped scaffold, not a fully wired real Kogwistar backend. So the current repo status is:
+The plugin and bridge are working together correctly, and the bridge now uses a
+real embedded Kogwistar runtime plus durable operator state. But the
+persistence/read-model design is still hybrid and not yet the final
+graph-native architecture. So the current repo status is:
 
 - real OpenClaw checkout: yes
 - real local plugin integration: yes
 - real bridge HTTP/runtime path: yes
-- real durable Kogwistar backend usage: no
-- full live OpenClaw host-session proof: not yet complete
+- real embedded Kogwistar runtime usage: yes
+- real durable bridge governance state: yes
+- final graph-native Kogwistar persistence architecture: not yet complete
+- full live OpenClaw host-session proof: partially proven through the current E2E seam, but still worth stating carefully as the environment evolves

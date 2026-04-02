@@ -8,7 +8,7 @@ The current scaffold has:
 
 - a host-side OpenClaw plugin
 - a thin bridge service
-- an in-memory policy stub
+- an in-memory policy stub => changed to kogwistar persistence
 
 That is enough for early seam validation, but it is not the intended long-term architecture.
 
@@ -122,6 +122,7 @@ That is how the runtime passes in:
 - policy evaluators
 - agent wrappers
 
+It is important to note that it need to be injected on deserializing and striped in serializing for transport and persistence.
 This is important because governance-specific code should live in resolver functions, not in raw bridge endpoints.
 
 ### Execution trace

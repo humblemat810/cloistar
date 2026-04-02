@@ -718,6 +718,18 @@ For the `approval` case, the harness supports these approval modes:
 - `llm`
   - Use a second OpenClaw agent call as a simple approval judge that returns `ALLOW_ONCE` or `DENY`.
 
+Important meaning of `approval --approval-mode llm` today:
+
+- This is a harness-level LLM approver.
+- It uses a second OpenClaw agent call as the approval judge.
+- It is not yet the full Kogwistar-substrate approval workflow.
+- So when you demo `approval-llm`, what you are showing is:
+  - OpenClaw requester agent
+  - bridge governance runtime and durable state
+  - bridge approval suspension/resume
+  - a second LLM-driven approver actor
+- That is already a valid live AI approval demo, but it is important not to oversell it as the final Kogwistar-native approval loop.
+
 Examples:
 
 ```bash
@@ -752,6 +764,108 @@ Examples:
   --demo-case approval \
   --approval-mode llm
 ```
+
+## LLM Approval Demo
+
+If you want the simplest "AI approves another AI tool call" demo, start here.
+
+What this demo proves:
+
+- the requester agent produces a tool call that triggers `requireApproval`
+- the bridge records canonical governance events
+- the bridge runtime suspends on approval
+- a second LLM actor decides `ALLOW_ONCE` or `DENY`
+- the bridge resolves the approval and resumes or denies accordingly
+
+What this demo does not claim yet:
+
+- it is not yet the final fully graph-native Kogwistar approval workflow
+- it is not yet a human approval demo
+- it is not yet proof that every OpenClaw downstream approval surface is removed from the path
+
+### Foolproof path: self-starting
+
+Run exactly this first:
+
+```bash
+cd /home/azureuser/cloistar
+/home/azureuser/cloistar/.venv/bin/python \
+  scripts/run-openclaw-governance-three-terminal.py \
+  --demo-case approval \
+  --approval-mode llm
+```
+
+What should happen:
+
+- the harness starts the helper stack for you
+- the requester agent triggers the approval case
+- the bridge enters `requireApproval`
+- the LLM approver subprocess is invoked automatically
+- the harness prints a summary JSON/result at the end
+
+If it fails, the first things to check are:
+
+- your `.venv` interpreter is the one used by VS Code and the terminal
+- `pip install -e ./kogwistar[chroma]` has already been run
+- your local OpenClaw/Ollama setup is available for the helper
+
+### Foolproof path: attached-stack
+
+Use this only if you already have the helper running and want to reuse that same stable stack.
+
+1. Start the helper in another terminal and keep it running.
+2. Confirm the bridge URL it printed.
+3. Use the same run directory as that helper.
+
+Then run:
+
+```bash
+RUN_DIR="/home/azureuser/cloistar/.tmp/openclaw-gateway-e2e/current"
+/home/azureuser/cloistar/.venv/bin/python \
+  scripts/run-openclaw-governance-three-terminal.py \
+  --use-existing-stack \
+  --bridge-url http://127.0.0.1:<bridge-port> \
+  --run-dir "$RUN_DIR" \
+  --demo-case approval \
+  --approval-mode llm
+```
+
+Attached-stack checklist:
+
+- the helper must still be running
+- `--bridge-url` must match the current bridge
+- `--run-dir` must match that helper’s isolated OpenClaw state
+- if those do not match, the LLM approval demo will attach to the wrong stack and mislead you
+
+### Pytest version of the same live demo
+
+Self-starting live E2E including the `approval-llm` case:
+
+```bash
+OPENCLAW_RUN_E2E=1 \
+/home/azureuser/cloistar/.venv/bin/python -m pytest \
+  bridge/tests/test_openclaw_three_terminal_e2e.py -q
+```
+
+Attached-stack live E2E including the `approval-llm` case:
+
+```bash
+OPENCLAW_RUN_E2E=1 \
+OPENCLAW_RUN_EXISTING_STACK_E2E=1 \
+OPENCLAW_EXISTING_BRIDGE_URL=http://127.0.0.1:<bridge-port> \
+OPENCLAW_EXISTING_RUN_DIR=/home/azureuser/cloistar/.tmp/openclaw-gateway-e2e/current \
+/home/azureuser/cloistar/.venv/bin/python -m pytest \
+  bridge/tests/test_openclaw_three_terminal_existing_stack_e2e.py -q
+```
+
+### Which doc to use for which demo
+
+- human/manual approval demo:
+  - use this quickstart and `--approval-mode manual`
+- AI/LLM approval demo:
+  - use this quickstart and `--approval-mode llm`
+- fast non-live bridge integration matrix:
+  - use `bridge/tests/test_policy_matrix_pytest.py`
 
 Attached-stack example:
 
