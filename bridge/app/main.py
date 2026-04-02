@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 
 from .domain.governance_append import append_approval_resolution, append_event, register_approval_request
+from .domain.governance_models import ApprovalRuntimeAttachmentRow
 from .integrations.openclaw_dto import (
     OpenClawAfterToolCallPayload,
     OpenClawApprovalResolutionPayload,
@@ -158,17 +159,18 @@ def before_tool_call(payload: OpenClawBeforeToolCallPayload) -> dict:
         register_approval_request(store, approval_event, suspended_event.data.suspensionId)
         approval_id = approval_event.data.approvalRequestId
         if runtime_decision is not None:
+            runtime_attachment: ApprovalRuntimeAttachmentRow = {
+                "workflowId": runtime_decision.workflow.get("workflowId"),
+                "workflowRunId": runtime_decision.workflow.get("runId"),
+                "runtimeConversationId": runtime_decision.workflow.get("conversationId"),
+                "runtimeTurnNodeId": runtime_decision.workflow.get("turnNodeId"),
+                "suspendedNodeId": runtime_decision.workflow.get("suspendedNodeId"),
+                "suspendedTokenId": runtime_decision.workflow.get("suspendedTokenId"),
+                "runtimeProjection": dict(runtime_decision.projection),
+            }
             store.attach_runtime_to_approval(
                 approval_id,
-                {
-                    "workflowId": runtime_decision.workflow.get("workflowId"),
-                    "workflowRunId": runtime_decision.workflow.get("runId"),
-                    "runtimeConversationId": runtime_decision.workflow.get("conversationId"),
-                    "runtimeTurnNodeId": runtime_decision.workflow.get("turnNodeId"),
-                    "suspendedNodeId": runtime_decision.workflow.get("suspendedNodeId"),
-                    "suspendedTokenId": runtime_decision.workflow.get("suspendedTokenId"),
-                    "runtimeProjection": dict(runtime_decision.projection),
-                },
+                runtime_attachment,
             )
 
     return project_decision(evaluation, approval_id).model_dump()

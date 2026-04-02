@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from hashlib import sha256
 import json
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired, TypedDict, TypeAlias
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -244,3 +244,108 @@ CanonicalGovernanceEvent = (
     | ExecutionDeniedEvent
     | ToolCallCompletedEvent
 )
+
+
+class ApprovalRow(TypedDict):
+    approvalRequestId: str
+    governanceCallId: str
+    decisionId: str
+    requestedEventId: str
+    suspensionId: str
+    status: str
+    requestedAt: str
+    projection: dict[str, Any]
+    toolCallId: str | None
+    sessionId: str | None
+    toolName: str | None
+    workflowRunId: NotRequired[str]
+    workflowId: NotRequired[str]
+    suspendedNodeId: NotRequired[str]
+    suspendedTokenId: NotRequired[str]
+    runtimeConversationId: NotRequired[str]
+    runtimeTurnNodeId: NotRequired[str]
+    runtimeProjection: NotRequired[dict[str, Any]]
+    gatewayApprovalId: NotRequired[str]
+    resolvedAt: NotRequired[str]
+
+
+class GatewayApprovalRequestRef(TypedDict, total=False):
+    toolName: str
+    toolCallId: str
+    sessionKey: str
+
+
+class GatewayApprovalRequestedPayload(TypedDict):
+    id: str
+    request: GatewayApprovalRequestRef
+    createdAtMs: int | None
+    expiresAtMs: int | None
+
+
+class GatewayApprovalResolvedPayload(TypedDict, total=False):
+    id: str
+    request: GatewayApprovalRequestRef
+    decision: str
+    resolvedBy: str
+    ts: int | None
+
+
+class GatewayApprovalRow(TypedDict):
+    gatewayApprovalId: str
+    kind: str
+    status: str
+    request: GatewayApprovalRequestRef
+    createdAtMs: NotRequired[int | None]
+    expiresAtMs: NotRequired[int | None]
+    decision: NotRequired[str | None]
+    resolvedBy: NotRequired[str | None]
+    ts: NotRequired[int | None]
+    bridgeApprovalId: NotRequired[str]
+
+
+class WorkflowRunRow(TypedDict, total=False):
+    governanceCallId: str
+    workflowId: str
+    runId: str
+    conversationId: str
+    turnNodeId: str
+    status: str
+    decision: str
+    finalDisposition: str
+    approvalResolution: str
+    suspendedNodeId: str
+    suspendedTokenId: str
+    projection: dict[str, Any]
+
+
+class GovernanceProjectionRow(TypedDict, total=False):
+    governanceCallId: str
+    proposalNodeId: str
+    decisionNodeId: str
+    approvalNodeId: str
+    resolutionNodeId: str
+    completionNodeId: str
+    completionOutcome: str
+
+
+class ApprovalSubscriptionStatusRow(TypedDict):
+    enabled: bool
+    started: bool
+    connected: bool
+    lastError: str | None
+    lastRequestedEventAt: int | None
+    lastResolvedEventAt: int | None
+    lastStatusAt: int | None
+
+
+class ApprovalRuntimeAttachmentRow(TypedDict, total=False):
+    workflowId: str | None
+    workflowRunId: str | None
+    runtimeConversationId: str | None
+    runtimeTurnNodeId: str | None
+    suspendedNodeId: str | None
+    suspendedTokenId: str | None
+    runtimeProjection: dict[str, Any]
+
+
+DebugStateSnapshot: TypeAlias = dict[str, Any]
