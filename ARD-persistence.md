@@ -188,6 +188,214 @@ The exact labels may evolve, but the pattern should stay:
 - side-event nodes and relationship edges pointing at the relevant backbone step
 - no ad hoc detached approval rows as the long-term truth
 
+## Desired Debug Graph Shape
+
+This section is the target shape humans and future implementation work should
+debug against.
+
+It is intentionally more concrete than the earlier roadmap language. When a
+live governance run is inspected, the question should be:
+
+- does the stored graph still resemble this backbone plus side-event shape?
+- does the main branch have a stable append-only order?
+- do approval artifacts attach to the right backbone anchor instead of becoming
+  detached rows?
+
+### Main branch semantics
+
+The governance conversation should have one canonical append-only main branch
+per `governanceCallId`.
+
+The current intended scoped sequence stream is:
+
+- scope id: `governance:{governanceCallId}`
+- metadata field: `metadata["seq"]`
+- sequence source: Kogwistar scoped-sequence hook, not ad hoc local counters
+
+Main-branch node families that should participate in that append-only sequence:
+
+- `governance_backbone_step`
+- `governance_proposal`
+- `governance_decision`
+- `governance_approval_request`
+- `governance_approval_resolution`
+- `governance_completion`
+
+Important rule:
+
+- `seq` is for append-order within one governance lineage
+- not every side edge or external status row needs a `seq`
+- if a node is part of the operator-facing main branch, it should have a stable
+  scoped `seq`
+
+### Mermaid reference shape
+
+```mermaid
+flowchart LR
+    subgraph AllowPath["Allow path"]
+        direction TB
+        A_WI["waiting_input<br/>backbone step<br/>seq=1"]
+        A_IR["input_received<br/>backbone step<br/>seq=2"]
+        A_PA["policy_approved<br/>backbone step<br/>seq=3"]
+        A_WO["waiting_output<br/>backbone step<br/>seq=4"]
+        A_OR["output_received<br/>backbone step<br/>seq=5"]
+
+        A_GP["proposal<br/>side event<br/>seq~=main branch"]
+        A_GD["decision<br/>side event<br/>seq~=main branch"]
+        A_GC["completion<br/>side event<br/>seq~=main branch"]
+
+        A_WI -->|next| A_IR -->|next| A_PA -->|next| A_WO -->|next| A_OR
+        A_IR -->|observed_at| A_GP
+        A_PA -->|decision_at| A_GD
+        A_OR -->|completed_at| A_GC
+        A_GP -->|governance_decided| A_GD
+        A_GD -->|governance_completed_as| A_GC
+    end
+
+    subgraph BlockPath["Block path"]
+        direction TB
+        B_WI["waiting_input<br/>backbone step<br/>seq=1"]
+        B_IR["input_received<br/>backbone step<br/>seq=2"]
+        B_PR["policy_rejected<br/>backbone step<br/>seq=3"]
+
+        B_GP["proposal<br/>side event<br/>seq~=main branch"]
+        B_GD["decision<br/>side event<br/>seq~=main branch"]
+
+        B_WI -->|next| B_IR -->|next| B_PR
+        B_IR -->|observed_at| B_GP
+        B_PR -->|decision_at| B_GD
+        B_GP -->|governance_decided| B_GD
+    end
+
+    subgraph ApprovalPath["Require-approval path"]
+        direction TB
+        R_WI["waiting_input<br/>backbone step<br/>seq=1"]
+        R_IR["input_received<br/>backbone step<br/>seq=2"]
+        R_RA["require_approval<br/>backbone step<br/>seq=3"]
+        R_WA["waiting_approval<br/>backbone step<br/>seq=4"]
+        R_AS["approval_suspended<br/>backbone step<br/>seq=5"]
+        R_AR["approval_received<br/>backbone step<br/>seq=6"]
+        R_GR["governance_resolved<br/>backbone step<br/>seq=7"]
+        R_RC["run_completed<br/>backbone step<br/>seq=8"]
+
+        R_GP["proposal<br/>side event<br/>seq~=main branch"]
+        R_GD["decision<br/>side event<br/>seq~=main branch"]
+        R_GAR["approval request<br/>side event<br/>seq~=main branch"]
+        R_GRS["approval resolution<br/>side event<br/>seq~=main branch"]
+        R_GC["completion<br/>side event<br/>seq~=main branch<br/>outcome=allow|deny"]
+
+        R_WI -->|next| R_IR -->|next| R_RA -->|next| R_WA -->|next| R_AS -->|next| R_AR
+        R_AR -->|next| R_GR -->|next| R_RC
+
+        R_IR -->|observed_at| R_GP
+        R_RA -->|decision_at| R_GD
+        R_WA -->|approval_requested_at| R_GAR
+        R_AR -->|approval_resolved_at| R_GRS
+        R_RC -->|completed_at| R_GC
+
+        R_GP -->|governance_decided| R_GD
+        R_GD -->|governance_requires_approval| R_GAR
+        R_GAR -->|governance_resolved_as| R_GRS
+        R_GRS -->|resolution=allow| R_GC
+        R_GRS -->|resolution=deny| R_GC
+    end
+```
+
+### Read the Mermaid as a debugging contract
+
+Interpretation rules:
+
+- The `backbone:*` nodes are the canonical operator-facing branch.
+- `proposal`, `decision`, `approval request`, `approval resolution`, and
+  `completion` are side-event nodes attached to the relevant backbone step.
+- The three lanes are alternative shapes shown side by side for readability.
+- They are not parallel executions of the same run.
+- In the approval lane, allow vs deny is a value difference on the same
+  topology, not a different branch family:
+  - both pass through approval resolution
+  - both continue through governance resolution and run completion
+  - the difference is carried by the approval-resolution value and completion outcome
+- A single run should only realize one valid lane:
+  - allow path
+  - block path
+  - requireApproval path, followed by either allow or deny resolution values
+- A run should not create both `policy_approved` and `policy_rejected` in the
+  same realized lineage unless a future retry/repair design explicitly says so.
+
+### Minimal realized shapes by policy outcome
+
+Allow path:
+
+- `waiting_input`
+- `input_received`
+- `policy_approved`
+- `waiting_output`
+- `output_received`
+
+Block path:
+
+- `waiting_input`
+- `input_received`
+- `policy_rejected`
+
+Require-approval allow path:
+
+- `waiting_input`
+- `input_received`
+- `require_approval`
+- `waiting_approval`
+- `approval_suspended`
+- `approval_received`
+- `governance_resolved`
+- `run_completed`
+- completion outcome metadata says `allow`
+
+Require-approval deny path:
+
+- `waiting_input`
+- `input_received`
+- `require_approval`
+- `waiting_approval`
+- `approval_suspended`
+- `approval_received`
+- `governance_resolved`
+- `run_completed`
+- completion outcome metadata says `deny`
+
+### Approval metadata expectations
+
+When approval is resolved, the resolution-side node or attached metadata should
+carry enough operator detail to reconstruct how the approval happened.
+
+Expected fields where available:
+
+- approval channel
+- approval method
+- human comment
+- literal words used
+- actor type such as `human` or `llm`
+- optional LLM rationale / thinking metadata
+
+Missing metadata should remain explicitly absent rather than fabricated.
+
+### Current implementation alignment
+
+Today the live bridge/runtime path already approximates this design:
+
+- a backbone step chain is written by `GovernanceService`
+- governance proposal/decision/approval/completion nodes are written by the
+  runtime host and resolvers
+- governance main-branch nodes now use Kogwistar scoped sequence stamping with
+  scope `governance:{governanceCallId}`
+
+Still unfinished relative to this target:
+
+- `/debug/state` is not yet rebuilt purely by graph query
+- some operator-facing rows remain bridge-owned convenience projections
+- not every debugging view yet renders this backbone directly
+- the current implementation still needs a clearer alignment between approval
+  resolution values and the operator-facing backbone labels shown above
+
 ## Node And Edge Style Guidance
 
 For this stage, use the repo’s already-proven patterns rather than inventing a

@@ -627,6 +627,14 @@ class GovernanceService:
 
     def _ensure_backbone_step(self, governance_call_id: str, step: str) -> str:
         node_id = f"govbackbone|{governance_call_id}|{step}"
+        backend = getattr(self.conversation_engine, "backend", None)
+        if backend is not None and hasattr(backend, "node_get"):
+            try:
+                got = backend.node_get(ids=[node_id], include=[])
+            except Exception:
+                got = None
+            if isinstance(got, dict) and got.get("ids"):
+                return node_id
         self.conversation_engine.write.add_node(
             governance_node(
                 node_id=node_id,

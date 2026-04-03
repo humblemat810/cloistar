@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, cast
+from typing import Any, Sequence, cast
 from uuid import uuid4
 
 from kogwistar.engine_core.engine import GraphKnowledgeEngine
@@ -21,12 +21,26 @@ from ..domain.governance_models import (
     WorkflowRunRow,
 )
 from .governance_design import GOVERNANCE_WORKFLOW_ID, ensure_governance_workflow_design
-from .governance_graph import governance_edge, governance_node
+from .governance_graph import governance_edge, governance_node, install_governance_scoped_seq_hooks
 from .governance_resolvers import governance_resolver
 
 
-def _zero_embeddings(texts: list[str]) -> list[list[float]]:
-    return [[0.0, 0.0, 0.0] for _ in texts]
+class _ZeroEmbeddingFunction:
+    """Deterministic tiny embedder compatible with real Chroma clients."""
+
+    _name = "ZeroEmbedding"
+
+    def name(self) -> str:
+        return self._name
+
+    def __call__(self, input: Sequence[str]) -> list[list[float]]:
+        return [[0.001, 0.0010, 0.00010] for _ in input]
+
+    def is_legacy(self) -> bool:
+        return False
+
+
+_ZERO_EMBEDDING_FUNCTION = _ZeroEmbeddingFunction()
 
 
 @dataclass
@@ -50,13 +64,16 @@ class GovernanceRuntimeHost:
         self.workflow_engine = GraphKnowledgeEngine(
             persist_directory=str(self.data_dir / "workflow"),
             kg_graph_type="workflow",
-            embedding_function=_zero_embeddings,
+            embedding_function=_ZERO_EMBEDDING_FUNCTION,
         )
         self.conversation_engine = GraphKnowledgeEngine(
             persist_directory=str(self.data_dir / "conversation"),
             kg_graph_type="conversation",
-            embedding_function=_zero_embeddings,
+            embedding_function=_ZERO_EMBEDDING_FUNCTION,
         )
+        # Governance keeps its own append-only branch ordering, separate from the
+        # chat-domain conversation sequencing policy.
+        install_governance_scoped_seq_hooks(self.conversation_engine)
         ensure_governance_workflow_design(self.workflow_engine, workflow_id=self.workflow_id)
         self.runtime = WorkflowRuntime(
             workflow_engine=self.workflow_engine,
