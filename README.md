@@ -1,150 +1,195 @@
-# Kogwistar × OpenClaw governance scaffold
+# Kogwistar × OpenClaw Governance Integration
 
-This repo is a starter scaffold for a **thin OpenClaw plugin** plus a **local Kogwistar bridge service**.
+This repo is no longer just a thin starter scaffold. It now contains a live
+OpenClaw plugin, a live FastAPI bridge, an embedded Kogwistar governance
+runtime, a durable bridge-side governance store, and runnable integration and
+E2E harnesses for `allow`, `block`, and `requireApproval` flows.
 
-The intent is to keep OpenClaw focused on execution while Kogwistar owns:
-
-- policy evaluation
-- event append / oplog intake
-- approval state
-- durable audit and projection
+The current architecture is still evolving. The bridge/runtime path is real and
+testable today, while the final graph-native persistence/read-model design is
+still in progress.
 
 ## Start Here
 
-- [Architecture](./architecture.md) - current dev topology and integration seam
-- [Dev Debug Cycle](./dev-debug-cycle.md) - the host/plugin/bridge iteration loop
-- [ARD](./ARD.md) - roadmap for correctness, observability, tests, and hardening
-- [Persistence ARD](./ARD-persistence.md) - roadmap for moving bridge governance state from in-memory projection toward durable Kogwistar-backed persistence
-- [Kogwistar Integration Guide](./kogwistar-integration-guide.md) - how the bridge should host Kogwistar runtime, resolvers, and persistence
-- [OpenClaw plugin manifest](./plugin/openclaw.plugin.json) - native plugin metadata
-- [OpenClaw plugin entry](./plugin/src/index.ts) - hook wiring and governance calls
-- [Bridge entrypoint](./bridge/app/main.py) - FastAPI governance endpoints and debug state
+- [OpenClaw Governance E2E Quickstart](./openclaw-governance-e2e-quickstart.md)
+  Operator-facing setup, live helper commands, approval demos, and LLM approval demo flow.
+- [OpenClaw Bridge E2E Status](./openclaw-bridge-e2e-status.md)
+  What is currently proven live, what is still hybrid, and what remains missing.
+- [Architecture](./architecture.md)
+  Current dev topology and the intended OpenClaw/plugin/bridge/Kogwistar seam.
+- [ARD](./ARD.md)
+  Main roadmap for correctness, observability, tests, and hardening.
+- [Persistence ARD](./ARD-persistence.md)
+  Roadmap for moving from the current durable bridge store to a fuller graph-native persistent model.
+- [Kogwistar Integration Guide](./kogwistar-integration-guide.md)
+  How the bridge should host Kogwistar runtime, resolvers, and persistence.
 
-## Action Quick Lookup
+## Current Status
 
-| If you want to... | Look here | What to check |
+What is real today:
+
+- OpenClaw plugin hooks post real `before_tool_call`, `after_tool_call`, and approval-resolution payloads to the bridge.
+- The bridge returns real `allow`, `block`, and `requireApproval` OpenClaw decisions.
+- The bridge hosts a real embedded Kogwistar `WorkflowRuntime` for governance decisioning and approval suspend/resume.
+- The bridge persists operator-facing governance state through a durable service/store path.
+- The repo includes:
+  - fast bridge integration tests
+  - live three-terminal E2E harnesses
+  - self-starting and attached-stack E2E modes
+  - demo-only approval tracing via `sys.monitoring`
+
+What is not final yet:
+
+- The persistence architecture is still hybrid, not yet the final graph-native read model.
+- The bridge still uses a local governance policy implementation, not a production policy engine.
+- The repo is still refining restart/rebuild/query semantics around the durable store and graph artifacts.
+
+## Quick Actions
+
+| If you want to... | Start here | Notes |
 | --- | --- | --- |
-| Block a dangerous tool call | [`bridge/app/policy.py`](./bridge/app/policy.py) and [`plugin/src/index.ts`](./plugin/src/index.ts) | The bridge must return `block`, and the plugin must translate that into `block: true` during `before_tool_call`. |
-| Require approval before a tool runs | [`bridge/app/policy.py`](./bridge/app/policy.py) and [`plugin/src/index.ts`](./plugin/src/index.ts) | The bridge must return `requireApproval`, and the plugin must return the OpenClaw approval object with an `onResolution` callback. |
-| Trace what the plugin sent | [`plugin/src/kogwistar-client.ts`](./plugin/src/kogwistar-client.ts) | Check the payload posted to `/policy/before-tool-call`, `/events/after-tool-call`, or `/approval/resolution`. |
-| Trace what the bridge decided | [`bridge/app/main.py`](./bridge/app/main.py) | Check the returned decision and `/debug/state`. |
-| Register or re-register the plugin | [`scripts/install-plugin-host.sh`](./scripts/install-plugin-host.sh) | Make sure the local OpenClaw checkout is valid and the plugin id is enabled. |
-| Rebuild the plugin | [`plugin/package.json`](./plugin/package.json) and [`plugin/tsconfig.json`](./plugin/tsconfig.json) | Run `npm install` then `npm run build` so `plugin/dist/index.js` is regenerated. |
+| Run the full local helper stack | [`openclaw-governance-e2e-quickstart.md`](./openclaw-governance-e2e-quickstart.md) | Best operator entrypoint. |
+| Run a live `allow`, `block`, or `approval` demo | [`scripts/run-openclaw-gateway-governance-e2e.sh`](./scripts/run-openclaw-gateway-governance-e2e.sh) | Supports `--demo-case allow|block|approval`. |
+| Run the three-terminal E2E harness | [`scripts/run-openclaw-governance-three-terminal.py`](./scripts/run-openclaw-governance-three-terminal.py) | Supports self-starting and attached-stack flows. |
+| Demo LLM approval | [`openclaw-governance-e2e-quickstart.md`](./openclaw-governance-e2e-quickstart.md) | Use `approval --approval-mode llm`. |
+| Emit a dedicated approval demo trace file | [`scripts/run-openclaw-gateway-governance-e2e.sh`](./scripts/run-openclaw-gateway-governance-e2e.sh) | Add `--demo-probe` to write `demo-approval-trace.jsonl`. |
+| Inspect current bridge state | [`bridge/app/main.py`](./bridge/app/main.py) | Use `/debug/state`. |
+| Change policy behavior | [`bridge/app/policy.py`](./bridge/app/policy.py) | Controls `allow`, `block`, `requireApproval`. |
+| Inspect runtime suspend/resume logic | [`bridge/app/runtime/governance_runtime.py`](./bridge/app/runtime/governance_runtime.py) | Native Kogwistar workflow host. |
+| Inspect durable governance store behavior | [`bridge/app/runtime/governance_service.py`](./bridge/app/runtime/governance_service.py) and [`bridge/app/store.py`](./bridge/app/store.py) | Bridge-facing durable store facade. |
+| Inspect plugin hook wiring | [`plugin/src/index.ts`](./plugin/src/index.ts) | OpenClaw hook entrypoint. |
 
-## Layout
+## Quick Start
+
+### Fastest live helper run
+
+```bash
+cd /home/azureuser/cloistar
+bash scripts/run-openclaw-gateway-governance-e2e.sh --ollama-model qwen3:4b
+```
+
+### Fastest approval demo
+
+```bash
+cd /home/azureuser/cloistar
+bash scripts/run-openclaw-gateway-governance-e2e.sh \
+  --stable-run-dir \
+  --ollama-model qwen3:4b \
+  --demo-case approval
+```
+
+### Approval demo with dedicated demo trace
+
+```bash
+cd /home/azureuser/cloistar
+bash scripts/run-openclaw-gateway-governance-e2e.sh \
+  --stable-run-dir \
+  --demo-probe \
+  --ollama-model qwen3:4b \
+  --demo-case approval
+```
+
+### Fast in-process bridge integration tests
+
+```bash
+/home/azureuser/cloistar/.venv/bin/python -m pytest bridge/tests/test_policy_matrix_pytest.py -q
+```
+
+### Focused demo-probe tests
+
+```bash
+/home/azureuser/cloistar/.venv/bin/python -m pytest bridge/tests/test_demo_approval_probe.py -q
+```
+
+### Live three-terminal E2E matrix
+
+```bash
+OPENCLAW_RUN_E2E=1 /home/azureuser/cloistar/.venv/bin/python -m pytest bridge/tests/test_openclaw_three_terminal_e2e.py -q
+```
+
+## Repo Layout
 
 ```text
 .
-├── docker-compose.yml
-├── .env.example
-├── configs/
-│   └── openclaw/
-│       └── openclaw.json5
-├── plugin/
-│   ├── openclaw.plugin.json
-│   ├── package.json
-│   ├── tsconfig.json
-│   └── src/
-│       ├── index.ts
-│       └── kogwistar-client.ts
 ├── bridge/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── app/
-│       ├── main.py
-│       ├── models.py
-│       ├── policy.py
-│       └── store.py
-└── scripts/
-    ├── dev-up.sh
-    ├── dev-down.sh
-    └── install-plugin.sh
+│   ├── app/
+│   │   ├── demo/
+│   │   │   ├── approval_probe.py
+│   │   │   └── launch_bridge_with_probe.py
+│   │   ├── domain/
+│   │   │   ├── governance_append.py
+│   │   │   └── governance_models.py
+│   │   ├── integrations/
+│   │   │   ├── openclaw_dto.py
+│   │   │   └── openclaw_mapper.py
+│   │   ├── projections/
+│   │   │   └── openclaw_projection.py
+│   │   ├── runtime/
+│   │   │   ├── governance_design.py
+│   │   │   ├── governance_graph.py
+│   │   │   ├── governance_resolvers.py
+│   │   │   ├── governance_runtime.py
+│   │   │   └── governance_service.py
+│   │   ├── main.py
+│   │   ├── policy.py
+│   │   └── store.py
+│   ├── tests/
+│   │   ├── test_bridge_contract.py
+│   │   ├── test_demo_approval_probe.py
+│   │   ├── test_governance_service.py
+│   │   ├── test_openclaw_three_terminal_e2e.py
+│   │   ├── test_openclaw_three_terminal_existing_stack_e2e.py
+│   │   └── test_policy_matrix_pytest.py
+│   └── requirements.txt
+├── plugin/
+│   ├── src/
+│   │   ├── governance-contract.ts
+│   │   ├── index.ts
+│   │   └── kogwistar-client.ts
+│   ├── dist/
+│   ├── openclaw.plugin.json
+│   └── package.json
+├── scripts/
+│   ├── lib/
+│   │   ├── openclaw-gateway-approval-listener.mjs
+│   │   └── openclaw-governance-harness.mjs
+│   ├── manual-governance-smoke.mjs
+│   ├── run-guarded-bridge-test.sh
+│   ├── run-openclaw-gateway-governance-e2e.sh
+│   ├── run-openclaw-governance-three-terminal.py
+│   └── run-safe-governance-resume-probe.sh
+├── architecture.md
+├── ARD.md
+├── ARD-persistence.md
+├── kogwistar-integration-guide.md
+├── openclaw-bridge-e2e-status.md
+└── openclaw-governance-e2e-quickstart.md
 ```
 
-## What this scaffold does
+## Main Runtime Flow
 
-- Runs a local FastAPI bridge on `http://127.0.0.1:8788`
-- Ships an OpenClaw native plugin starter
-- Intercepts `before_tool_call` and `after_tool_call`
-- Sends tool-call proposals and outcomes to the bridge
-- Lets the bridge decide:
-  - allow
-  - block
-  - requireApproval
-
-## What you still need to wire
-
-This scaffold is intentionally thin. You still need to connect:
-
-- real Kogwistar storage / event append
-- real graph projection
-- real approval persistence
-- your exact OpenClaw local install path
-- your preferred OpenClaw startup method
-
-## Quick start
-
-### 1) Start the bridge
-
-```bash
-cp .env.example .env
-docker compose up --build bridge
-```
-
-### 2) Build the plugin
-
-```bash
-cd plugin
-npm install
-npm run build
-```
-
-### 3) Install the plugin into your local OpenClaw
-
-From the repo root:
-
-```bash
-./scripts/install-plugin.sh
-```
-
-### 4) Point OpenClaw config at this plugin path
-
-Copy the example config from:
-
-```text
-configs/openclaw/openclaw.json5
-```
-
-into your local OpenClaw config and update the absolute path placeholders.
-
-### 5) Restart OpenClaw Gateway
-
-```bash
-openclaw gateway restart
-```
-
-## Development loop
-
-- edit bridge code → `docker compose up --build bridge`
-- edit plugin code → `npm run build`
-- restart the gateway after plugin/config changes
-
-## Suggested next steps
-
-- replace the in-memory bridge store with your Kogwistar append API
-- add a conversation binding adapter
-- persist approval resolutions into your event log
-- project tool calls into conversation / execution / governance graphs
-
-## Hook architecture
 OpenClaw runtime
-   └─ asks hook: "may I do this tool call?"
+  -> plugin hook
+  -> bridge `/policy/before-tool-call`
+  -> bridge canonicalization and durable store updates
+  -> Kogwistar workflow runtime evaluates policy
+  -> bridge returns `allow`, `block`, or `requireApproval`
+  -> OpenClaw executes, blocks, or suspends
+  -> bridge records completion or approval resolution
+  -> Kogwistar runtime resumes when approval is granted or denied
 
-Hook inside OpenClaw
-   └─ asks external Kogwistar policy service
+## Recommended Operator Entry Points
 
-Kogwistar policy service
-   └─ returns allow / block / requireApproval
+- Human operator testing:
+  Use [openclaw-governance-e2e-quickstart.md](./openclaw-governance-e2e-quickstart.md).
+- Live status / reality check:
+  Use [openclaw-bridge-e2e-status.md](./openclaw-bridge-e2e-status.md).
+- Design / roadmap review:
+  Use [architecture.md](./architecture.md), [ARD.md](./ARD.md), and [ARD-persistence.md](./ARD-persistence.md).
 
-Hook returns decision to OpenClaw
-   └─ OpenClaw aborts, pauses, or continues
+## Notes
+
+- Treat OpenClaw as an external immutable runtime boundary in this repo.
+- Prefer Gateway subscriptions, operator APIs, and compiled runtime surfaces over patching OpenClaw internals.
+- The current recommended human start point is the quickstart, not the older Docker-first scaffold flow.
+- The current bridge stack is runnable and useful today, but the persistence and graph-read-model story is still under active development.
