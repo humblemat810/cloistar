@@ -136,6 +136,17 @@ class GovernanceRuntimeHost:
             final_state=result.final_state,
             status=result.status,
         )
+        self._link_workflow_with_backbone(
+            governance_call_id=governance_call_id,
+            run_id=run_id,
+            trigger_step="input_received",
+            result_step={
+                "allow": "policy_approved",
+                "block": "policy_rejected",
+                "require_approval": "require_approval",
+            }.get(evaluation.disposition),
+            projection=projection,
+        )
         return GovernanceRuntimeDecision(
             evaluation=evaluation,
             workflow=workflow,
@@ -229,6 +240,13 @@ class GovernanceRuntimeHost:
         )
         workflow["approvalResolution"] = resolution
         workflow["projection"] = dict(projection)
+        self._link_workflow_with_backbone(
+            governance_call_id=governance_call_id,
+            run_id=run_id,
+            trigger_step="approval_received",
+            result_step="governance_resolved",
+            projection=projection,
+        )
         return GovernanceRuntimeResume(
             workflow=workflow,
             projection=projection,
@@ -283,6 +301,26 @@ class GovernanceRuntimeHost:
             )
         projection["completionNodeId"] = completion_node_id
         projection["completionOutcome"] = outcome
+        run_id = workflow_run.get("runId")
+        if isinstance(run_id, str) and run_id:
+            self._link_workflow_node_to_semantic_node(
+                governance_call_id=governance_call_id,
+                run_id=run_id,
+                target_node_id=completion_node_id,
+                relation="workflow_produced",
+                summary="Workflow run produced completion result",
+            )
+            self._link_workflow_to_backbone_result(
+                governance_call_id=governance_call_id,
+                run_id=run_id,
+                backbone_step="run_completed",
+            )
+        self._link_backbone_step_to_semantic_node(
+            governance_call_id=governance_call_id,
+            backbone_step="run_completed",
+            target_node_id=completion_node_id,
+            relation="governance_completed_at",
+        )
         return projection
 
     @staticmethod
@@ -393,6 +431,183 @@ class GovernanceRuntimeHost:
             "suspendedTokenId": suspended_token_id,
             "projection": GovernanceRuntimeHost._projection_from_state(final_state),
         }
+
+    def _link_workflow_with_backbone(
+        self,
+        *,
+        governance_call_id: str,
+        run_id: str,
+        trigger_step: str | None,
+        result_step: str | None,
+        projection: GovernanceProjectionRow,
+    ) -> None:
+        if trigger_step:
+            self._link_backbone_to_workflow(
+                governance_call_id=governance_call_id,
+                run_id=run_id,
+                backbone_step=trigger_step,
+            )
+        if result_step:
+            self._link_workflow_to_backbone_result(
+                governance_call_id=governance_call_id,
+                run_id=run_id,
+                backbone_step=result_step,
+            )
+        for node_key in ("proposalNodeId", "decisionNodeId", "approvalNodeId", "resolutionNodeId"):
+            node_id = projection.get(node_key)
+            if isinstance(node_id, str) and node_id:
+                self._link_workflow_node_to_semantic_node(
+                    governance_call_id=governance_call_id,
+                    run_id=run_id,
+                    target_node_id=node_id,
+                    relation="workflow_produced",
+                    summary=f"Workflow run produced {node_key}",
+                )
+        self._anchor_projection_nodes_to_backbone(
+            governance_call_id=governance_call_id,
+            projection=projection,
+            decision_step=result_step,
+        )
+
+    def _link_backbone_to_workflow(
+        self,
+        *,
+        governance_call_id: str,
+        run_id: str,
+        backbone_step: str,
+    ) -> None:
+        self._ensure_backbone_step(governance_call_id, backbone_step)
+        self.conversation_engine.write.add_edge(
+            governance_edge(
+                edge_id=f"govwf|{governance_call_id}|{backbone_step}|trigger|{run_id}",
+                source_id=f"govbackbone|{governance_call_id}|{backbone_step}",
+                target_id=f"wf_run|{run_id}",
+                relation="governance_triggers_workflow",
+                label="governance_triggers_workflow",
+                summary=f"Backbone step {backbone_step} triggered workflow run",
+                doc_id=f"gov:{governance_call_id}",
+                metadata={"entity_type": "governance_edge"},
+            )
+        )
+
+    def _link_workflow_to_backbone_result(
+        self,
+        *,
+        governance_call_id: str,
+        run_id: str,
+        backbone_step: str,
+    ) -> None:
+        self._ensure_backbone_step(governance_call_id, backbone_step)
+        self.conversation_engine.write.add_edge(
+            governance_edge(
+                edge_id=f"govwf|{governance_call_id}|result|{run_id}|{backbone_step}",
+                source_id=f"wf_run|{run_id}",
+                target_id=f"govbackbone|{governance_call_id}|{backbone_step}",
+                relation="workflow_result_at",
+                label="workflow_result_at",
+                summary=f"Workflow run result anchored at backbone step {backbone_step}",
+                doc_id=f"gov:{governance_call_id}",
+                metadata={"entity_type": "governance_edge"},
+            )
+        )
+
+    def _anchor_projection_nodes_to_backbone(
+        self,
+        *,
+        governance_call_id: str,
+        projection: GovernanceProjectionRow,
+        decision_step: str | None,
+    ) -> None:
+        anchors = (
+            ("proposalNodeId", "input_received", "governance_observed_at"),
+            ("decisionNodeId", decision_step or "decision_recorded", "governance_decision_at"),
+            ("approvalNodeId", "waiting_approval", "governance_approval_requested_at"),
+            ("resolutionNodeId", "approval_received", "governance_approval_resolved_at"),
+        )
+        for node_key, backbone_step, relation in anchors:
+            node_id = projection.get(node_key)
+            if not isinstance(node_id, str) or not node_id:
+                continue
+            self._link_backbone_step_to_semantic_node(
+                governance_call_id=governance_call_id,
+                backbone_step=backbone_step,
+                target_node_id=node_id,
+                relation=relation,
+            )
+
+    def _link_backbone_step_to_semantic_node(
+        self,
+        *,
+        governance_call_id: str,
+        backbone_step: str,
+        target_node_id: str,
+        relation: str,
+    ) -> None:
+        self._ensure_backbone_step(governance_call_id, backbone_step)
+        self.conversation_engine.write.add_edge(
+            governance_edge(
+                edge_id=f"govbackbone|{governance_call_id}|runtime|{backbone_step}|{target_node_id}|{relation}",
+                source_id=f"govbackbone|{governance_call_id}|{backbone_step}",
+                target_id=target_node_id,
+                relation=relation,
+                label=relation,
+                summary=f"Backbone step {backbone_step} references runtime semantic node {target_node_id}",
+                doc_id=f"gov:{governance_call_id}",
+                metadata={
+                    "entity_type": "governance_backbone_side_event",
+                    "governance_call_id": governance_call_id,
+                    "step": backbone_step,
+                },
+            )
+        )
+
+    def _link_workflow_node_to_semantic_node(
+        self,
+        *,
+        governance_call_id: str,
+        run_id: str,
+        target_node_id: str,
+        relation: str,
+        summary: str,
+    ) -> None:
+        self.conversation_engine.write.add_edge(
+            governance_edge(
+                edge_id=f"govwf|{governance_call_id}|node|{run_id}|{target_node_id}|{relation}",
+                source_id=f"wf_run|{run_id}",
+                target_id=target_node_id,
+                relation=relation,
+                label=relation,
+                summary=summary,
+                doc_id=f"gov:{governance_call_id}",
+                metadata={"entity_type": "governance_edge"},
+            )
+        )
+
+    def _ensure_backbone_step(self, governance_call_id: str, step: str) -> str:
+        node_id = f"govbackbone|{governance_call_id}|{step}"
+        backend = getattr(self.conversation_engine, "backend", None)
+        if backend is not None and hasattr(backend, "node_get"):
+            try:
+                got = backend.node_get(ids=[node_id], include=[])
+            except Exception:
+                got = None
+            if isinstance(got, dict) and got.get("ids"):
+                return node_id
+        self.conversation_engine.write.add_node(
+            governance_node(
+                node_id=node_id,
+                label=step.replace("_", " "),
+                summary=f"Governance backbone step {step}",
+                doc_id=f"gov:{governance_call_id}",
+                metadata={
+                    "entity_type": "governance_backbone_step",
+                    "governance_call_id": governance_call_id,
+                    "step": step,
+                },
+                properties={"governanceCallId": governance_call_id, "step": step},
+            )
+        )
+        return node_id
 
 
 _governance_runtime_host: GovernanceRuntimeHost | None = None

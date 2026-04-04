@@ -104,6 +104,10 @@ def _build_probe_tables() -> tuple[dict[CodeType, ProbeTarget], dict[CodeType, d
     targets: dict[CodeType, ProbeTarget] = {
         bridge_main.before_tool_call.__code__: ProbeTarget(event_on_start="before_tool_call.enter", event_on_return="policy.decision"),
         bridge_main.approval_resolution.__code__: ProbeTarget(event_on_start="approval.resolution.enter", event_on_return="approval.resolution.completed"),
+        bridge_main._apply_approval_resolution_payload.__code__: ProbeTarget(
+            event_on_start="approval.resolution.apply.enter",
+            event_on_return="approval.resolution.apply.completed",
+        ),
         bridge_main.after_tool_call.__code__: ProbeTarget(event_on_start="after_tool_call.enter", event_on_return="tool.completed"),
         PersistentGovernanceStore.register_approval_request.__code__: ProbeTarget(event_on_return="approval.requested"),
         PersistentGovernanceStore.resolve_approval.__code__: ProbeTarget(event_on_return="approval.resolved.store"),
@@ -125,14 +129,14 @@ def _build_probe_tables() -> tuple[dict[CodeType, ProbeTarget], dict[CodeType, d
                 stage="before_tool_call.require_approval",
             ),
         },
-        bridge_main.approval_resolution.__code__: {
-            _find_line(bridge_main.approval_resolution, "updated = append_approval_resolution("): LineProbe(
-                line_no=_find_line(bridge_main.approval_resolution, "updated = append_approval_resolution("),
+        bridge_main._apply_approval_resolution_payload.__code__: {
+            _find_line(bridge_main._apply_approval_resolution_payload, "updated = append_approval_resolution("): LineProbe(
+                line_no=_find_line(bridge_main._apply_approval_resolution_payload, "updated = append_approval_resolution("),
                 event="approval.resolution.received",
                 stage="approval_resolution.append",
             ),
-            _find_line(bridge_main.approval_resolution, '{"resumeError": str(exc)},'): LineProbe(
-                line_no=_find_line(bridge_main.approval_resolution, '{"resumeError": str(exc)},'),
+            _find_line(bridge_main._apply_approval_resolution_payload, '{"resumeError": str(exc)},'): LineProbe(
+                line_no=_find_line(bridge_main._apply_approval_resolution_payload, '{"resumeError": str(exc)},'),
                 event="error.caught",
                 stage="approval_resolution.resume_error",
             ),
@@ -370,4 +374,3 @@ def _find_line(func: Any, snippet: str) -> int:
     if len(matches) != 1:
         raise ValueError(f"expected exactly one match for {snippet!r} in {func.__qualname__}")
     return matches[0]
-

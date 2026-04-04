@@ -23,6 +23,8 @@ from .integrations.openclaw_mapper import (
     canonicalize_before_tool_call,
     decision_event_from_policy,
     follow_up_event_for_resolution,
+    result_and_completion_events_from_policy,
+    result_and_completion_events_from_resolution,
 )
 from .policy import decide
 from .projections.openclaw_projection import project_decision
@@ -41,7 +43,23 @@ def _approval_listener_script() -> Path:
 approval_listener_process: subprocess.Popen[str] | None = None
 
 
-def _start_approval_listener() -> bool:
+def _stop_approval_listener() -> None:
+    global approval_listener_process
+
+    if approval_listener_process is None or approval_listener_process.poll() is not None:
+        approval_listener_process = None
+        return
+
+    approval_listener_process.terminate()
+    try:
+        approval_listener_process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        approval_listener_process.kill()
+        approval_listener_process.wait(timeout=5)
+    approval_listener_process = None
+
+
+def _start_approval_listener(*, force_restart: bool = False) -> bool:
     global approval_listener_process
 
     should_start_listener = os.getenv("OPENCLAW_APPROVAL_EVENT_SUBSCRIPTION") == "1"
@@ -54,6 +72,8 @@ def _start_approval_listener() -> bool:
     )
     if not should_start_listener or not listener_script.exists():
         return False
+    if force_restart:
+        _stop_approval_listener()
     if approval_listener_process is not None and approval_listener_process.poll() is None:
         store.update_approval_subscription_status({"started": True})
         return True
@@ -72,19 +92,90 @@ def _start_approval_listener() -> bool:
     return True
 
 
+def _is_approval_pending_after_tool_call(payload: OpenClawAfterToolCallPayload) -> bool:
+    result = payload.result
+    if not isinstance(result, dict):
+        return False
+    details = result.get("details")
+    if not isinstance(details, dict):
+        return False
+    status = details.get("status")
+    if not isinstance(status, str):
+        return False
+    normalized = status.strip().lower().replace("_", "-")
+    return normalized == "approval-pending"
+
+
+def _apply_approval_resolution_payload(
+    payload: OpenClawApprovalResolutionPayload,
+    *,
+    approval: dict,
+) -> dict:
+    receipt = build_receipt("approval_resolution", payload)
+    store.record_receipt(receipt)
+
+    resolved_event = canonicalize_approval_resolution(
+        payload,
+        receipt,
+        approval_request_id=payload.approvalId,
+        governance_call_id=approval["governanceCallId"],
+    )
+    resolved_event.causationId = approval["requestedEventId"]
+    follow_up_event = follow_up_event_for_resolution(resolved_event, approval["suspensionId"])
+    result_event, completed_event = result_and_completion_events_from_resolution(
+        resolved_event,
+        follow_up_event,
+    )
+    updated = append_approval_resolution(
+        store,
+        resolved_event,
+        follow_up_event,
+        result_event=result_event,
+        completed_event=completed_event,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="approval not found")
+
+    runtime_resume = None
+    try:
+        runtime_resume = get_governance_runtime_host().resume_approval(
+            approval,
+            resolution=resolved_event.data.resolution,
+            resolved_at=resolved_event.data.resolvedAt.isoformat(),
+        )
+    except Exception as exc:
+        store.upsert_workflow_run(
+            approval["governanceCallId"],
+            {"resumeError": str(exc)},
+        )
+
+    if runtime_resume is not None:
+        store.upsert_workflow_run(approval["governanceCallId"], runtime_resume.workflow)
+        store.upsert_governance_projection(approval["governanceCallId"], runtime_resume.projection)
+
+    return {"ok": True}
+
+
+def _gateway_decision_to_resolution(decision: str | None) -> str | None:
+    if not isinstance(decision, str):
+        return None
+    normalized = decision.strip().lower().replace("_", "-")
+    mapping = {
+        "allow-once": "allow-once",
+        "allow-always": "allow-always",
+        "deny": "deny",
+        "timeout": "timeout",
+        "cancelled": "cancelled",
+    }
+    return mapping.get(normalized)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global approval_listener_process
     try:
         yield
     finally:
-        if approval_listener_process is not None and approval_listener_process.poll() is None:
-            approval_listener_process.terminate()
-            try:
-                approval_listener_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                approval_listener_process.kill()
-        approval_listener_process = None
+        _stop_approval_listener()
 
 
 app = FastAPI(
@@ -107,7 +198,7 @@ def debug_state() -> dict:
 
 @app.post("/gateway/approval-subscription/start")
 def start_gateway_approval_subscription() -> dict[str, bool]:
-    started = _start_approval_listener()
+    started = _start_approval_listener(force_restart=True)
     return {"ok": started}
 
 
@@ -172,6 +263,10 @@ def before_tool_call(payload: OpenClawBeforeToolCallPayload) -> dict:
                 approval_id,
                 runtime_attachment,
             )
+    elif evaluation.disposition in {"allow", "block"}:
+        result_event, completed_event = result_and_completion_events_from_policy(decision_event)
+        append_event(store, result_event)
+        append_event(store, completed_event)
 
     return project_decision(evaluation, approval_id).model_dump()
 
@@ -180,6 +275,8 @@ def before_tool_call(payload: OpenClawBeforeToolCallPayload) -> dict:
 def after_tool_call(payload: OpenClawAfterToolCallPayload) -> dict:
     receipt = build_receipt("after_tool_call", payload)
     store.record_receipt(receipt)
+    if _is_approval_pending_after_tool_call(payload):
+        return {"ok": True, "status": "approval_pending"}
     completed_event = canonicalize_after_tool_call(payload, receipt)
     append_event(store, completed_event)
     workflow_run = store.get_workflow_run(completed_event.subject.governanceCallId)
@@ -215,49 +312,62 @@ def approval_resolution(payload: OpenClawApprovalResolutionPayload) -> dict:
     approval = store.get_approval(payload.approvalId)
     if approval is None:
         raise HTTPException(status_code=404, detail="approval not found")
-
-    receipt = build_receipt("approval_resolution", payload)
-    store.record_receipt(receipt)
-
-    resolved_event = canonicalize_approval_resolution(
-        payload,
-        receipt,
-        approval_request_id=payload.approvalId,
-        governance_call_id=approval["governanceCallId"],
-    )
-    resolved_event.causationId = approval["requestedEventId"]
-    follow_up_event = follow_up_event_for_resolution(resolved_event, approval["suspensionId"])
-    updated = append_approval_resolution(store, resolved_event, follow_up_event)
-    if updated is None:
-        raise HTTPException(status_code=404, detail="approval not found")
-
-    runtime_resume = None
-    try:
-        runtime_resume = get_governance_runtime_host().resume_approval(
-            approval,
-            resolution=resolved_event.data.resolution,
-            resolved_at=resolved_event.data.resolvedAt.isoformat(),
-        )
-    except Exception as exc:
-        store.upsert_workflow_run(
-            approval["governanceCallId"],
-            {"resumeError": str(exc)},
-        )
-
-    if runtime_resume is not None:
-        store.upsert_workflow_run(approval["governanceCallId"], runtime_resume.workflow)
-        store.upsert_governance_projection(approval["governanceCallId"], runtime_resume.projection)
-
-    return {"ok": True}
+    return _apply_approval_resolution_payload(payload, approval=approval)
 
 
 @app.post("/gateway/plugin-approval/requested")
 def gateway_plugin_approval_requested(payload: dict) -> dict:
-    store.register_gateway_approval("plugin", payload)
-    return {"ok": True}
+    return _gateway_approval_requested("plugin", payload)
+
+
+@app.post("/gateway/exec-approval/requested")
+def gateway_exec_approval_requested(payload: dict) -> dict:
+    return _gateway_approval_requested("exec", payload)
 
 
 @app.post("/gateway/plugin-approval/resolved")
 def gateway_plugin_approval_resolved(payload: dict) -> dict:
-    store.resolve_gateway_approval("plugin", payload)
+    return _gateway_approval_resolved("plugin", payload)
+
+
+@app.post("/gateway/exec-approval/resolved")
+def gateway_exec_approval_resolved(payload: dict) -> dict:
+    return _gateway_approval_resolved("exec", payload)
+
+
+def _gateway_approval_requested(kind: str, payload: dict) -> dict:
+    store.register_gateway_approval(kind, payload)
+    return {"ok": True}
+
+
+def _gateway_approval_resolved(kind: str, payload: dict) -> dict:
+    gateway_record = store.resolve_gateway_approval(kind, payload)
+    if gateway_record is None:
+        return {"ok": True}
+
+    bridge_approval_id = gateway_record.get("bridgeApprovalId")
+    resolution = _gateway_decision_to_resolution(payload.get("decision"))
+    request = payload.get("request")
+    request_data = request if isinstance(request, dict) else {}
+    approval = None
+    if isinstance(bridge_approval_id, str) and bridge_approval_id:
+        approval = store.get_approval(bridge_approval_id)
+    if approval is None:
+        approval = store.find_approval_for_gateway_request(
+            request_data if request_data else gateway_record.get("request") or {}
+        )
+        if approval is not None:
+            bridge_approval_id = approval.get("approvalRequestId")
+    if isinstance(bridge_approval_id, str) and bridge_approval_id and resolution is not None:
+        approval = approval or store.get_approval(bridge_approval_id)
+        if approval is not None and approval.get("status") == "pending":
+            synthetic_payload = OpenClawApprovalResolutionPayload(
+                pluginId="openclaw.gateway",
+                sessionId=request_data.get("sessionKey") or approval.get("sessionId"),
+                toolName=request_data.get("toolName") or approval.get("toolName"),
+                resolution=resolution,
+                approvalId=bridge_approval_id,
+                rawEvent=dict(payload),
+            )
+            return _apply_approval_resolution_payload(synthetic_payload, approval=approval)
     return {"ok": True}

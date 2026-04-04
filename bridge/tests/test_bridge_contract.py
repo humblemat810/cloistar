@@ -115,6 +115,8 @@ class BridgeContractTests(unittest.TestCase):
             [
                 "governance.tool_call_observed.v1",
                 "governance.decision_recorded.v1",
+                "governance.result_recorded.v1",
+                "governance.completed.v1",
             ],
         )
         self.assertEqual(len(snapshot["receipts"]), 1)
@@ -227,11 +229,171 @@ class BridgeContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         snapshot = store.snapshot()
         self.assertEqual(snapshot["approvals"][approval_id]["gatewayApprovalId"], "plugin:real-gateway-id")
+        self.assertEqual(snapshot["approvals"][approval_id]["status"], "allow_once")
         self.assertEqual(
             snapshot["gatewayApprovals"]["plugin:real-gateway-id"]["decision"],
             "allow-once",
         )
         self.assertEqual(snapshot["approvalSubscription"]["lastResolvedEventAt"], 1_775_054_565_000)
+        self.assertEqual(
+            [event["eventType"] for event in snapshot["events"][-2:]],
+            [
+                "governance.result_recorded.v1",
+                "governance.completed.v1",
+            ],
+        )
+
+    def test_gateway_exec_approval_resolution_links_to_existing_bridge_approval(self) -> None:
+        raw = load_fixture("openclaw", "before_tool_call.require_approval.json")
+        decision_response = self.client.post("/policy/before-tool-call", json=raw)
+        approval_id = decision_response.json()["approvalId"]
+
+        requested_payload = {
+            "id": "10ea4f1f-a908-4238-8d5f-752c2e50cb16",
+            "request": {
+                "toolName": raw["toolName"],
+                "toolCallId": raw["rawEvent"]["toolCallId"],
+                "sessionKey": raw["sessionId"],
+            },
+            "createdAtMs": 1_775_054_560_000,
+            "expiresAtMs": 1_775_054_680_000,
+        }
+        requested_response = self.client.post("/gateway/exec-approval/requested", json=requested_payload)
+        self.assertEqual(requested_response.status_code, 200)
+
+        resolved_payload = {
+            "id": "10ea4f1f-a908-4238-8d5f-752c2e50cb16",
+            "decision": "deny",
+            "resolvedBy": "operator-cli",
+            "ts": 1_775_054_565_000,
+            "request": requested_payload["request"],
+        }
+        response = self.client.post("/gateway/exec-approval/resolved", json=resolved_payload)
+
+        self.assertEqual(response.status_code, 200)
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["approvals"][approval_id]["gatewayApprovalId"], "10ea4f1f-a908-4238-8d5f-752c2e50cb16")
+        self.assertEqual(snapshot["approvals"][approval_id]["status"], "deny")
+        self.assertEqual(
+            snapshot["gatewayApprovals"]["10ea4f1f-a908-4238-8d5f-752c2e50cb16"]["decision"],
+            "deny",
+        )
+        self.assertEqual(
+            [event["eventType"] for event in snapshot["events"][-2:]],
+            [
+                "governance.result_recorded.v1",
+                "governance.completed.v1",
+            ],
+        )
+
+    def test_gateway_exec_resolution_still_resolves_when_gateway_request_arrives_first(self) -> None:
+        raw = load_fixture("openclaw", "before_tool_call.require_approval.json")
+        requested_payload = {
+            "id": "early-gateway-exec-id",
+            "request": {
+                "toolName": raw["toolName"],
+                "toolCallId": raw["rawEvent"]["toolCallId"],
+                "sessionKey": raw["sessionId"],
+            },
+            "createdAtMs": 1_775_054_560_000,
+            "expiresAtMs": 1_775_054_680_000,
+        }
+        requested_response = self.client.post("/gateway/exec-approval/requested", json=requested_payload)
+        self.assertEqual(requested_response.status_code, 200)
+
+        decision_response = self.client.post("/policy/before-tool-call", json=raw)
+        approval_id = decision_response.json()["approvalId"]
+
+        resolved_payload = {
+            "id": "early-gateway-exec-id",
+            "decision": "deny",
+            "resolvedBy": "operator-cli",
+            "ts": 1_775_054_565_000,
+            "request": requested_payload["request"],
+        }
+        response = self.client.post("/gateway/exec-approval/resolved", json=resolved_payload)
+
+        self.assertEqual(response.status_code, 200)
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["approvals"][approval_id]["gatewayApprovalId"], "early-gateway-exec-id")
+        self.assertEqual(snapshot["approvals"][approval_id]["status"], "deny")
+        self.assertEqual(
+            snapshot["gatewayApprovals"]["early-gateway-exec-id"]["bridgeApprovalId"],
+            approval_id,
+        )
+        self.assertEqual(
+            [event["eventType"] for event in snapshot["events"][-2:]],
+            [
+                "governance.result_recorded.v1",
+                "governance.completed.v1",
+            ],
+        )
+
+    def test_gateway_exec_resolution_links_when_gateway_request_lacks_tool_call_id(self) -> None:
+        before_raw = load_fixture("openclaw", "before_tool_call.require_approval.json")
+        gateway_id = "exec-gateway-no-toolcallid-1"
+
+        requested_payload = {
+            "id": gateway_id,
+            "request": {
+                "sessionKey": before_raw["sessionId"],
+                "command": before_raw["params"]["command"],
+                "cwd": "/tmp/demo-workspace",
+                "host": "gateway",
+            },
+            "createdAtMs": 1_775_054_560_000,
+            "expiresAtMs": 1_775_054_680_000,
+        }
+        requested_response = self.client.post("/gateway/exec-approval/requested", json=requested_payload)
+        self.assertEqual(requested_response.status_code, 200)
+
+        pending_payload = {
+            "pluginId": before_raw["pluginId"],
+            "sessionId": before_raw["sessionId"],
+            "toolName": before_raw["toolName"],
+            "params": deepcopy(before_raw["params"]),
+            "result": {
+                "details": {
+                    "status": "approval-pending",
+                    "approvalId": gateway_id,
+                }
+            },
+            "error": None,
+            "durationMs": 123,
+            "rawEvent": deepcopy(before_raw["rawEvent"]),
+        }
+        pending_response = self.client.post("/events/after-tool-call", json=pending_payload)
+        self.assertEqual(pending_response.status_code, 200)
+        self.assertEqual(pending_response.json()["status"], "approval_pending")
+
+        decision_response = self.client.post("/policy/before-tool-call", json=before_raw)
+        approval_id = decision_response.json()["approvalId"]
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["approvals"][approval_id]["gatewayApprovalId"], gateway_id)
+        self.assertEqual(snapshot["gatewayApprovals"][gateway_id]["bridgeApprovalId"], approval_id)
+
+        resolved_payload = {
+            "id": gateway_id,
+            "decision": "allow-once",
+            "resolvedBy": "operator-cli",
+            "ts": 1_775_054_565_000,
+            "request": requested_payload["request"],
+        }
+        resolved_response = self.client.post("/gateway/exec-approval/resolved", json=resolved_payload)
+        self.assertEqual(resolved_response.status_code, 200)
+
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["approvals"][approval_id]["status"], "allow_once")
+        self.assertEqual(snapshot["gatewayApprovals"][gateway_id]["bridgeApprovalId"], approval_id)
+        self.assertEqual(
+            [event["eventType"] for event in snapshot["events"][-4:]],
+            [
+                "governance.approval_resolved.v1",
+                "governance.execution_resumed.v1",
+                "governance.result_recorded.v1",
+                "governance.completed.v1",
+            ],
+        )
 
     def test_gateway_approval_subscription_status_is_visible_in_debug_state(self) -> None:
         response = self.client.post(
@@ -288,10 +450,12 @@ class BridgeContractTests(unittest.TestCase):
         snapshot = store.snapshot()
         self.assertEqual(snapshot["approvals"][approval_id]["status"], "allow_once")
         self.assertEqual(
-            [event["eventType"] for event in snapshot["events"][-2:]],
+            [event["eventType"] for event in snapshot["events"][-4:]],
             [
                 "governance.approval_resolved.v1",
                 "governance.execution_resumed.v1",
+                "governance.result_recorded.v1",
+                "governance.completed.v1",
             ],
         )
         governance_call_id = snapshot["events"][0]["subject"]["governanceCallId"]
@@ -332,6 +496,41 @@ class BridgeContractTests(unittest.TestCase):
             "success",
         )
         self.assertIn("completionNodeId", snapshot["governanceProjection"][governance_call_id])
+
+    def test_after_tool_call_approval_pending_does_not_append_completion(self) -> None:
+        before_raw = load_fixture("openclaw", "before_tool_call.require_approval.json")
+        decision_response = self.client.post("/policy/before-tool-call", json=before_raw)
+        approval_id = decision_response.json()["approvalId"]
+        snapshot_before = store.snapshot()
+        governance_call_id = snapshot_before["events"][0]["subject"]["governanceCallId"]
+
+        pending_payload = {
+            "pluginId": before_raw["pluginId"],
+            "sessionId": before_raw["sessionId"],
+            "toolName": before_raw["toolName"],
+            "params": deepcopy(before_raw["params"]),
+            "result": {
+                "details": {
+                    "status": "approval-pending",
+                    "approvalId": approval_id,
+                }
+            },
+            "error": None,
+            "durationMs": 123,
+            "rawEvent": deepcopy(before_raw["rawEvent"]),
+        }
+
+        response = self.client.post("/events/after-tool-call", json=pending_payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "approval_pending")
+        snapshot = store.snapshot()
+        self.assertEqual(
+            [event["eventType"] for event in snapshot["events"]],
+            [event["eventType"] for event in snapshot_before["events"]],
+        )
+        self.assertEqual(snapshot["workflowRuns"][governance_call_id]["status"], "suspended")
+        self.assertNotIn("completionNodeId", snapshot["governanceProjection"][governance_call_id])
 
     def test_approval_resolution_for_unknown_id_returns_404(self) -> None:
         raw = load_fixture("openclaw", "approval_resolution.allow_once.json")

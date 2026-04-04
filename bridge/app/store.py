@@ -174,6 +174,64 @@ class PersistentGovernanceStore:
         record = self._service().get_record("approval", approval_id)
         return dict(record) if isinstance(record, dict) else None
 
+    def find_approval_for_gateway_request(self, request: GatewayApprovalRequestRef | dict[str, Any]) -> ApprovalRow | None:
+        request_data = request if isinstance(request, dict) else {}
+        tool_call_id = request_data.get("toolCallId")
+        tool_name = request_data.get("toolName")
+        session_key = request_data.get("sessionKey")
+
+        exact_match: ApprovalRow | None = None
+        fallback_match: ApprovalRow | None = None
+        for approval_row in self._service().list_records("approval"):
+            if approval_row.get("status") != "pending":
+                continue
+            if isinstance(tool_call_id, str) and tool_call_id and approval_row.get("toolCallId") == tool_call_id:
+                exact_match = dict(approval_row)
+                break
+            if (
+                exact_match is None
+                and isinstance(tool_name, str)
+                and tool_name
+                and approval_row.get("toolName") == tool_name
+                and isinstance(session_key, str)
+                and session_key
+                and approval_row.get("sessionId") == session_key
+            ):
+                fallback_match = dict(approval_row)
+        return exact_match or fallback_match
+
+    def find_approval_for_gateway_approval_id(self, gateway_approval_id: str) -> ApprovalRow | None:
+        if not isinstance(gateway_approval_id, str) or not gateway_approval_id:
+            return None
+        approval_by_governance_call: dict[str, ApprovalRow] = {}
+        for approval_row in self._service().list_records("approval"):
+            if approval_row.get("status") != "pending":
+                continue
+            governance_call_id = approval_row.get("governanceCallId")
+            if isinstance(governance_call_id, str) and governance_call_id:
+                approval_by_governance_call[governance_call_id] = dict(approval_row)
+
+        for receipt in self._service().list_records("receipt"):
+            if receipt.get("sourceEventType") != "after_tool_call":
+                continue
+            payload = receipt.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                continue
+            details = result.get("details")
+            if not isinstance(details, dict):
+                continue
+            if details.get("approvalId") != gateway_approval_id:
+                continue
+            governance_call_id = self._service()._receipt_governance_call_id(receipt)  # type: ignore[attr-defined]
+            if isinstance(governance_call_id, str):
+                approval_row = approval_by_governance_call.get(governance_call_id)
+                if approval_row is not None:
+                    return approval_row
+        return None
+
     def snapshot(self) -> DebugStateSnapshot:
         return self._service().materialize_debug_snapshot()
 
@@ -268,29 +326,35 @@ class PersistentGovernanceStore:
 
     def _attach_gateway_approval(self, approval_row: ApprovalRow) -> ApprovalRow:
         tool_call_id = approval_row.get("toolCallId")
-        if not isinstance(tool_call_id, str) or not tool_call_id:
-            return dict(approval_row)
         for gateway_row in self._service().list_records("gateway_approval"):
-            request = gateway_row.get("request")
-            if not isinstance(request, dict) or request.get("toolCallId") != tool_call_id:
+            gateway_approval_id = gateway_row.get("gatewayApprovalId")
+            if not isinstance(gateway_approval_id, str) or not gateway_approval_id:
                 continue
-            approval_row["gatewayApprovalId"] = gateway_row["gatewayApprovalId"]
+            matched = False
+            request = gateway_row.get("request")
+            if isinstance(tool_call_id, str) and tool_call_id and isinstance(request, dict):
+                matched = request.get("toolCallId") == tool_call_id
+            if not matched:
+                receipt_match = self.find_approval_for_gateway_approval_id(gateway_approval_id)
+                matched = (
+                    receipt_match is not None
+                    and receipt_match.get("approvalRequestId") == approval_row.get("approvalRequestId")
+                )
+            if not matched:
+                continue
+            approval_row["gatewayApprovalId"] = gateway_approval_id
             self._service().upsert_approval_record(approval_row["approvalRequestId"], approval_row)
             gateway_row["bridgeApprovalId"] = approval_row["approvalRequestId"]
-            self._service().upsert_gateway_approval_record(gateway_row["gatewayApprovalId"], gateway_row)
+            self._service().upsert_gateway_approval_record(gateway_approval_id, gateway_row)
             break
         return dict(approval_row)
 
     def _attach_bridge_approval(self, gateway_row: TGatewayApprovalRow) -> TGatewayApprovalRow:
         request = gateway_row.get("request")
-        if not isinstance(request, dict):
-            return gateway_row
-        tool_call_id = request.get("toolCallId")
-        if not isinstance(tool_call_id, str) or not tool_call_id:
-            return gateway_row
-        for approval_row in self._service().list_records("approval"):
-            if approval_row.get("toolCallId") != tool_call_id:
-                continue
+        request_match = self.find_approval_for_gateway_request(request) if isinstance(request, dict) else None
+        receipt_match = self.find_approval_for_gateway_approval_id(gateway_row["gatewayApprovalId"])
+        approval_row = request_match or receipt_match
+        if approval_row is not None:
             approval_row["gatewayApprovalId"] = gateway_row["gatewayApprovalId"]
             self._service().upsert_approval_record(approval_row["approvalRequestId"], approval_row)
             gateway_row["bridgeApprovalId"] = approval_row["approvalRequestId"]

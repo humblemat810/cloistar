@@ -2,6 +2,10 @@
 
 This document captures the next architecture step after the current bridge/runtime seam stabilization work: moving from a mostly in-memory bridge read model to a persistent governance state model that survives bridge restarts and supports replay, audit, and operator recovery.
 
+Related implementation note:
+
+- [governance-semantics-traps.md](/home/azureuser/cloistar/governance-semantics-traps.md) captures the concrete semantic traps and live failure modes we hit while wiring the governance graph, approval linkage, and CDC path.
+
 ## Goal
 
 Make governance state durable enough that a bridge restart does not erase the operator-facing truth.
@@ -227,6 +231,39 @@ Important rule:
 - not every side edge or external status row needs a `seq`
 - if a node is part of the operator-facing main branch, it should have a stable
   scoped `seq`
+
+### Future update: multi-turn session linking
+
+This is an explicit to-do for later graph evolution.
+
+Today the cleanest governance shape is still:
+
+- one governance backbone per governed tool call
+- one scoped append-only lineage per `governanceCallId`
+
+But the longer-term graph should also support a higher-level interaction view
+for one OpenClaw session or run family.
+
+Desired future addition:
+
+- keep each governed tool call as its own local governance backbone
+- but link those backbones into a larger session-level interaction graph
+- so a single long-running OpenClaw conversation can be inspected as:
+  - one shared graph substrate
+  - multiple governance branches
+  - optional cross-links by `sessionId`, `runId`, `toolCallId`, or parent turn
+
+Important constraint:
+
+- do not collapse multiple governed tool calls into one single backbone chain
+- instead, preserve one backbone per governed tool call and add higher-level
+  links between them
+
+This should eventually make it possible to inspect:
+
+- one isolated governance decision path
+- or the full multi-turn OpenClaw interaction history that produced many such
+  governed branches
 
 ### Mermaid reference shape
 

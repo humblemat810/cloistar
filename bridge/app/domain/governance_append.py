@@ -6,6 +6,8 @@ from .governance_models import (
     CanonicalGovernanceEvent,
     ExecutionDeniedEvent,
     ExecutionResumedEvent,
+    GovernanceCompletedEvent,
+    GovernanceResultRecordedEvent,
 )
 from typing import Any
 
@@ -22,6 +24,9 @@ def append_approval_resolution(
     store: Any,
     resolved_event: ApprovalResolvedEvent,
     follow_up_event: ExecutionResumedEvent | ExecutionDeniedEvent,
+    *,
+    result_event: GovernanceResultRecordedEvent | None = None,
+    completed_event: GovernanceCompletedEvent | None = None,
 ) -> dict | None:
     approval = store.resolve_approval(
         resolved_event.data.approvalRequestId,
@@ -33,4 +38,8 @@ def append_approval_resolution(
 
     store.append_canonical_event(resolved_event)
     store.append_canonical_event(follow_up_event)
+    if result_event is not None:
+        store.append_canonical_event(result_event)
+    if completed_event is not None:
+        store.append_canonical_event(completed_event)
     return approval

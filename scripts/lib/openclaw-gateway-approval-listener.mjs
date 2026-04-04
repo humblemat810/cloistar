@@ -80,7 +80,11 @@ const client = await createOperatorApprovalsGatewayClient({
     );
   },
   onEvent: (event) => {
-    if (event.event === "plugin.approval.requested") {
+    if (event.event === "plugin.approval.requested" || event.event === "exec.approval.requested") {
+      const isExecApproval = event.event === "exec.approval.requested";
+      const path = isExecApproval
+        ? "/gateway/exec-approval/requested"
+        : "/gateway/plugin-approval/requested";
       void postStatus({
         enabled: true,
         started: true,
@@ -88,14 +92,18 @@ const client = await createOperatorApprovalsGatewayClient({
         lastError: null,
         lastRequestedEventAt: event.payload?.createdAtMs ?? Date.now(),
       }).catch(() => undefined);
-      void postJson("/gateway/plugin-approval/requested", event.payload ?? {}).catch((error) => {
+      void postJson(path, event.payload ?? {}).catch((error) => {
         process.stderr.write(
-          `bridge approvals listener: failed to post requested event: ${String(error)}\n`,
+          `bridge approvals listener: failed to post requested event (${event.event}): ${String(error)}\n`,
         );
       });
       return;
     }
-    if (event.event === "plugin.approval.resolved") {
+    if (event.event === "plugin.approval.resolved" || event.event === "exec.approval.resolved") {
+      const isExecApproval = event.event === "exec.approval.resolved";
+      const path = isExecApproval
+        ? "/gateway/exec-approval/resolved"
+        : "/gateway/plugin-approval/resolved";
       void postStatus({
         enabled: true,
         started: true,
@@ -103,9 +111,9 @@ const client = await createOperatorApprovalsGatewayClient({
         lastError: null,
         lastResolvedEventAt: event.payload?.ts ?? Date.now(),
       }).catch(() => undefined);
-      void postJson("/gateway/plugin-approval/resolved", event.payload ?? {}).catch((error) => {
+      void postJson(path, event.payload ?? {}).catch((error) => {
         process.stderr.write(
-          `bridge approvals listener: failed to post resolved event: ${String(error)}\n`,
+          `bridge approvals listener: failed to post resolved event (${event.event}): ${String(error)}\n`,
         );
       });
     }

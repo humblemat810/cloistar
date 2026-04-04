@@ -6,6 +6,10 @@ from ..domain.governance_models import (
     ApprovalRequestSpec,
     ApprovalRequestedData,
     ApprovalRequestedEvent,
+    GovernanceCompletedData,
+    GovernanceCompletedEvent,
+    GovernanceResultRecordedData,
+    GovernanceResultRecordedEvent,
     ApprovalResolvedData,
     ApprovalResolvedEvent,
     CanonicalGovernanceEvent,
@@ -224,6 +228,100 @@ def follow_up_event_for_resolution(
             denyReason=deny_reason,
         ),
     )
+
+
+def result_and_completion_events_from_policy(
+    decision_event: DecisionRecordedEvent,
+) -> tuple[GovernanceResultRecordedEvent, GovernanceCompletedEvent]:
+    if decision_event.data.disposition == "require_approval":
+        raise ValueError("require_approval decisions need approval resolution before result/completion")
+
+    if decision_event.data.disposition == "allow":
+        final_disposition = "allow"
+        completion_reason = "policy_allowed"
+    else:
+        final_disposition = "block"
+        completion_reason = "policy_blocked"
+
+    result_event = GovernanceResultRecordedEvent(
+        occurredAt=decision_event.recordedAt,
+        recordedAt=decision_event.recordedAt,
+        correlationId=decision_event.correlationId,
+        causationId=decision_event.eventId,
+        streamId=decision_event.streamId,
+        subject=decision_event.subject,
+        provenance=decision_event.provenance,
+        data=GovernanceResultRecordedData(
+            finalDisposition=final_disposition,
+            executionOutcome="not_executed",
+            completionReason=completion_reason,
+        ),
+    )
+    completed_event = GovernanceCompletedEvent(
+        occurredAt=decision_event.recordedAt,
+        recordedAt=decision_event.recordedAt,
+        correlationId=decision_event.correlationId,
+        causationId=result_event.eventId,
+        streamId=decision_event.streamId,
+        subject=decision_event.subject,
+        provenance=decision_event.provenance,
+        data=GovernanceCompletedData(
+            finalDisposition=final_disposition,
+            executionOutcome="not_executed",
+            completionReason=completion_reason,
+        ),
+    )
+    return result_event, completed_event
+
+
+def result_and_completion_events_from_resolution(
+    resolved_event: ApprovalResolvedEvent,
+    follow_up_event: CanonicalGovernanceEvent,
+) -> tuple[GovernanceResultRecordedEvent, GovernanceCompletedEvent]:
+    resolution = resolved_event.data.resolution
+    if follow_up_event.eventType == "governance.execution_resumed.v1":
+        final_disposition = "allow"
+        completion_reason = "approval_granted"
+    elif resolution == "timeout":
+        final_disposition = "timeout"
+        completion_reason = "approval_timeout"
+    elif resolution == "cancelled":
+        final_disposition = "cancelled"
+        completion_reason = "approval_cancelled"
+    else:
+        final_disposition = "deny"
+        completion_reason = "approval_denied"
+
+    result_event = GovernanceResultRecordedEvent(
+        occurredAt=resolved_event.recordedAt,
+        recordedAt=resolved_event.recordedAt,
+        correlationId=resolved_event.correlationId,
+        causationId=follow_up_event.eventId,
+        streamId=resolved_event.streamId,
+        subject=resolved_event.subject,
+        provenance=resolved_event.provenance,
+        data=GovernanceResultRecordedData(
+            finalDisposition=final_disposition,
+            resolution=resolution,
+            executionOutcome="not_executed",
+            completionReason=completion_reason,
+        ),
+    )
+    completed_event = GovernanceCompletedEvent(
+        occurredAt=resolved_event.recordedAt,
+        recordedAt=resolved_event.recordedAt,
+        correlationId=resolved_event.correlationId,
+        causationId=result_event.eventId,
+        streamId=resolved_event.streamId,
+        subject=resolved_event.subject,
+        provenance=resolved_event.provenance,
+        data=GovernanceCompletedData(
+            finalDisposition=final_disposition,
+            executionOutcome="not_executed",
+            completionReason=completion_reason,
+        ),
+    )
+    return result_event, completed_event
 
 
 def _execution_context(

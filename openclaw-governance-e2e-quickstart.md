@@ -100,6 +100,37 @@ The demo probe is opt-in. It does not change normal bridge behavior when `--demo
 - OpenClaw hook events for prompt construction, model input/output, tool calls, and session/agent boundaries
 - visible model output and tool results, but not hidden chain-of-thought
 
+If you also want a fresh-start live CDC viewer for workflow and conversation events on every run, add `--demo-cdc`:
+
+```bash
+bash scripts/run-openclaw-gateway-governance-e2e.sh \
+  --stable-run-dir \
+  --demo-probe \
+  --demo-cdc \
+  --ollama-model qwen3:4b \
+  --demo-case approval \
+  --approval-mode llm
+```
+
+That mode:
+
+- starts a fresh Kogwistar CDC bridge for this run
+- resets only the CDC artifacts under `.tmp/openclaw-gateway-e2e/current/cdc` even when `--stable-run-dir` is reused
+- renders hosted local viewer pages for workflow and conversation CDC streams
+- prints the local workflow and conversation viewer URLs in the helper output
+
+The helper will surface URLs like:
+
+- `http://127.0.0.1:<port>/workflow.bundle.html`
+- `http://127.0.0.1:<port>/conversation.bundle.html`
+
+and it also prints:
+
+- the CDC ingest endpoint
+- the CDC websocket URL
+- the CDC oplog file path
+- the CDC pages directory
+
 ### Recommended For Pairing And Approval Work
 
 When you are testing `requireApproval`, use a stable reusable run directory so pairing and local OpenClaw state do not reset every run:
@@ -118,6 +149,11 @@ This uses:
 ```
 
 as the persistent run directory unless you override it with `--run-dir`.
+
+Important nuance with `--demo-cdc`:
+
+- the run directory stays stable
+- but the CDC subtree is intentionally recreated from scratch on every launch so the viewer starts empty before new events arrive
 
 Fast path for `requireApproval` with persistent state:
 

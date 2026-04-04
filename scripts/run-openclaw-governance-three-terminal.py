@@ -223,6 +223,17 @@ def poll_health(bridge_url: str, timeout_s: float) -> None:
     raise RuntimeError(f"bridge did not become healthy at {healthz}")
 
 
+def restart_bridge_approval_subscription(bridge_url: str) -> None:
+    request = urllib.request.Request(
+        f"{bridge_url.rstrip('/')}/gateway/approval-subscription/start",
+        data=b"",
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5.0) as response:
+        if not 200 <= response.status < 300:
+            raise RuntimeError(f"bridge approval subscription restart returned {response.status}")
+
+
 def stream_reader(label: str, stream, line_queue: queue.Queue[str]) -> None:
     try:
         for line in iter(stream.readline, ""):
@@ -553,6 +564,11 @@ def role_approver(args: argparse.Namespace) -> int:
     agent_pid = args.agent_pid
     approval_mode = args.approval_mode
     best_effort_pair(run_dir)
+    try:
+        restart_bridge_approval_subscription(bridge_url)
+        prefixed_print("approver", "restarted bridge approval subscription after pairing")
+    except Exception as exc:
+        prefixed_print("approver", f"bridge approval subscription restart failed: {exc}")
     if approval_mode == "llm":
         append_demo_trace(
             run_dir,

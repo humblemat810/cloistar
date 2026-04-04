@@ -181,6 +181,19 @@ class ToolCallCompletedData(CanonicalModel):
     durationMs: int | None = None
 
 
+class GovernanceResultRecordedData(CanonicalModel):
+    finalDisposition: Literal["allow", "block", "deny", "timeout", "cancelled"]
+    resolution: Literal["allow_once", "allow_always", "deny", "timeout", "cancelled"] | None = None
+    executionOutcome: Literal["not_executed", "executed"] = "not_executed"
+    completionReason: str
+
+
+class GovernanceCompletedData(CanonicalModel):
+    finalDisposition: Literal["allow", "block", "deny", "timeout", "cancelled"]
+    executionOutcome: Literal["not_executed", "executed"] = "not_executed"
+    completionReason: str
+
+
 class GovernanceEventBase(CanonicalModel):
     eventId: str = Field(default_factory=new_id)
     schemaVersion: Literal[1] = 1
@@ -234,6 +247,16 @@ class ToolCallCompletedEvent(GovernanceEventBase):
     data: ToolCallCompletedData
 
 
+class GovernanceResultRecordedEvent(GovernanceEventBase):
+    eventType: Literal["governance.result_recorded.v1"] = "governance.result_recorded.v1"
+    data: GovernanceResultRecordedData
+
+
+class GovernanceCompletedEvent(GovernanceEventBase):
+    eventType: Literal["governance.completed.v1"] = "governance.completed.v1"
+    data: GovernanceCompletedData
+
+
 CanonicalGovernanceEvent = (
     ToolCallObservedEvent
     | DecisionRecordedEvent
@@ -243,6 +266,8 @@ CanonicalGovernanceEvent = (
     | ExecutionResumedEvent
     | ExecutionDeniedEvent
     | ToolCallCompletedEvent
+    | GovernanceResultRecordedEvent
+    | GovernanceCompletedEvent
 )
 
 

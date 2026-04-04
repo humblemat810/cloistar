@@ -26,6 +26,7 @@ from ..domain.governance_models import (
     GovernanceProjectionRow,
     IntegrationReceipt,
     WorkflowRunRow,
+    stable_governance_call_id,
 )
 from .governance_graph import governance_edge, governance_grounding, governance_node
 
@@ -79,6 +80,16 @@ STRUCTURED_RECORD_KINDS: tuple[StructuredRecordKind, ...] = (
     "projection",
     "approval_subscription",
 )
+SEMANTIC_EVENT_ENTITY_TYPES: dict[str, str] = {
+    "governance.tool_call_observed.v1": "governance_proposal",
+    "governance.decision_recorded.v1": "governance_decision",
+    "governance.approval_requested.v1": "governance_approval_request",
+    "governance.approval_resolved.v1": "governance_approval_resolution",
+    "governance.result_recorded.v1": "governance_result",
+    "governance.completed.v1": "governance_completed",
+    "governance.tool_call_completed.v1": "governance_completion",
+}
+GENERIC_EVENT_ENTITY_TYPE = "governance_event"
 
 
 class GraphWritePort(Protocol):
@@ -139,19 +150,31 @@ class GovernanceService:
         event_id = str(event_record["eventId"])
         event_type = str(event_record["eventType"])
         governance_call_id = str(event_record["subject"]["governanceCallId"])
+        backbone_step, backbone_relation = self._persist_backbone_for_event(governance_call_id, event_record)
         node_id = self._persist_record(
             record_kind="event",
             record_id=event_id,
             payload=event_record,
             doc_id=STORE_DOC_IDS["events"],
             metadata={
+                "entity_type": self._event_entity_type(event_type),
                 "event_type": event_type,
                 "governance_call_id": governance_call_id,
+                "approval_request_id": event_record.get("subject", {}).get("approvalRequestId"),
             },
             label=event_type,
             summary=f"Canonical governance event {event_type}",
         )
-        self._persist_backbone_for_event(governance_call_id, event_record, event_node_id=node_id)
+        if backbone_step is not None and backbone_relation is not None:
+            self._link_event_to_backbone(
+                governance_call_id,
+                node_id,
+                backbone_step,
+                backbone_relation,
+            )
+        self._persist_semantic_event_relations(governance_call_id, event_record, event_node_id=node_id)
+        self._link_matching_receipts(governance_call_id, event_record, event_node_id=node_id)
+        self._reconcile_semantic_event_relations(governance_call_id)
         return dict(event_record)
 
     def persist_receipt_record(
@@ -526,13 +549,16 @@ class GovernanceService:
     ) -> str:
         """Persist one stable-id record node in the governance store namespace."""
         node_id = self._record_node_id(record_kind, record_id, payload)
+        if record_kind in STRUCTURED_RECORD_KINDS:
+            return node_id
+        entity_type = str(metadata.get("entity_type") or STORE_RECORD_ENTITY)
         node = governance_node(
             node_id=node_id,
             label=label,
             summary=summary,
             doc_id=doc_id,
             metadata={
-                "entity_type": STORE_RECORD_ENTITY,
+                "entity_type": entity_type,
                 "record_kind": record_kind,
                 "record_id": record_id,
                 **{k: v for k, v in metadata.items() if v is not None},
@@ -614,7 +640,9 @@ class GovernanceService:
                     "governance.approval_resolved.v1": "05",
                     "governance.execution_resumed.v1": "06",
                     "governance.execution_denied.v1": "07",
-                    "governance.tool_call_completed.v1": "08",
+                    "governance.result_recorded.v1": "08",
+                    "governance.completed.v1": "09",
+                    "governance.tool_call_completed.v1": "10",
                 }.get(str(record.get("eventType") or ""), "99")
             else:
                 event_rank = "00"
@@ -717,10 +745,7 @@ class GovernanceService:
         try:
             nodes = read.get_nodes(  # type: ignore[call-arg]
                 where={
-                    "$and": [
-                        {"entity_type": STORE_RECORD_ENTITY},
-                        {"record_kind": record_kind},
-                    ]
+                    "record_kind": record_kind
                 },
                 node_type=Node,
                 limit=20_000,
@@ -812,19 +837,332 @@ class GovernanceService:
             "rejected": 2,
         }.get(normalized, 1 if normalized else 0)
 
-    def _persist_backbone_for_event(
+    @staticmethod
+    def _event_entity_type(event_type: str) -> str:
+        return SEMANTIC_EVENT_ENTITY_TYPES.get(event_type, GENERIC_EVENT_ENTITY_TYPE)
+
+    def _persist_semantic_event_relations(
         self,
         governance_call_id: str,
         event_record: CanonicalGovernanceEventRow,
         *,
         event_node_id: str,
     ) -> None:
-        """Persist the operator-facing backbone chain and link the event to its anchor."""
+        event_type = str(event_record["eventType"])
+        event_id = str(event_record["eventId"])
+        subject = event_record.get("subject")
+        subject_data = subject if isinstance(subject, dict) else {}
+
+        if event_type == "governance.decision_recorded.v1":
+            predecessor_event_id = event_record.get("causationId")
+            if isinstance(predecessor_event_id, str) and predecessor_event_id:
+                self._link_semantic_events(
+                    governance_call_id=governance_call_id,
+                    source_event_id=predecessor_event_id,
+                    target_event_id=event_id,
+                    relation="governance_decided",
+                    summary="Proposal received a governance decision",
+                )
+            return
+
+        if event_type == "governance.approval_requested.v1":
+            predecessor_event_id = event_record.get("causationId")
+            if isinstance(predecessor_event_id, str) and predecessor_event_id:
+                self._link_semantic_events(
+                    governance_call_id=governance_call_id,
+                    source_event_id=predecessor_event_id,
+                    target_event_id=event_id,
+                    relation="governance_requires_approval",
+                    summary="Decision requires approval",
+                )
+            return
+
+        if event_type == "governance.execution_suspended.v1":
+            predecessor_event_id = event_record.get("causationId")
+            if isinstance(predecessor_event_id, str) and predecessor_event_id:
+                self._link_semantic_events(
+                    governance_call_id=governance_call_id,
+                    source_event_id=predecessor_event_id,
+                    target_event_id=event_id,
+                    relation="governance_suspended_for_approval",
+                    summary="Approval request suspended execution",
+                )
+            return
+
+        if event_type == "governance.approval_resolved.v1":
+            approval_request_id = subject_data.get("approvalRequestId")
+            if isinstance(approval_request_id, str) and approval_request_id:
+                predecessor_event_id = self._find_event_id(
+                    governance_call_id=governance_call_id,
+                    event_type="governance.execution_suspended.v1",
+                    approval_request_id=approval_request_id,
+                )
+                if predecessor_event_id is None:
+                    predecessor_event_id = self._find_event_id(
+                        governance_call_id=governance_call_id,
+                        event_type="governance.approval_requested.v1",
+                        approval_request_id=approval_request_id,
+                    )
+                if predecessor_event_id is not None:
+                    self._link_semantic_events(
+                        governance_call_id=governance_call_id,
+                        source_event_id=predecessor_event_id,
+                        target_event_id=event_id,
+                        relation="governance_resolved_as",
+                        summary="Approval request was resolved",
+                    )
+            return
+
+        if event_type in {"governance.execution_resumed.v1", "governance.execution_denied.v1"}:
+            predecessor_event_id = event_record.get("causationId")
+            if isinstance(predecessor_event_id, str) and predecessor_event_id:
+                self._link_semantic_events(
+                    governance_call_id=governance_call_id,
+                    source_event_id=predecessor_event_id,
+                    target_event_id=event_id,
+                    relation="governance_resulted_in",
+                    summary="Approval resolution produced the governance result",
+                )
+            return
+
+        if event_type == "governance.result_recorded.v1":
+            predecessor_event_id = event_record.get("causationId")
+            if isinstance(predecessor_event_id, str) and predecessor_event_id:
+                self._link_semantic_events(
+                    governance_call_id=governance_call_id,
+                    source_event_id=predecessor_event_id,
+                    target_event_id=event_id,
+                    relation="governance_result_recorded_as",
+                    summary="Governance result was recorded",
+                )
+            return
+
+        if event_type == "governance.completed.v1":
+            predecessor_event_id = event_record.get("causationId")
+            if isinstance(predecessor_event_id, str) and predecessor_event_id:
+                self._link_semantic_events(
+                    governance_call_id=governance_call_id,
+                    source_event_id=predecessor_event_id,
+                    target_event_id=event_id,
+                    relation="governance_completed",
+                    summary="Governance flow completed",
+                )
+            return
+
+        if event_type == "governance.tool_call_completed.v1":
+            predecessor_event_id = self._find_event_id(
+                governance_call_id=governance_call_id,
+                event_type="governance.completed.v1",
+            )
+            if predecessor_event_id is None:
+                predecessor_event_id = self._find_event_id(
+                    governance_call_id=governance_call_id,
+                    event_type="governance.execution_resumed.v1",
+                )
+            if predecessor_event_id is None:
+                predecessor_event_id = self._find_event_id(
+                    governance_call_id=governance_call_id,
+                    event_type="governance.decision_recorded.v1",
+                )
+            if predecessor_event_id is not None:
+                self._link_semantic_events(
+                    governance_call_id=governance_call_id,
+                    source_event_id=predecessor_event_id,
+                    target_event_id=event_id,
+                    relation="tool_execution_completed_as",
+                    summary="Tool execution finished after governance completion",
+                )
+
+    def _link_matching_receipts(
+        self,
+        governance_call_id: str,
+        event_record: CanonicalGovernanceEventRow,
+        *,
+        event_node_id: str,
+    ) -> None:
+        event_type = str(event_record.get("eventType") or "")
+        for receipt in self.list_records("receipt"):
+            receipt_id = receipt.get("receiptId")
+            if not isinstance(receipt_id, str):
+                continue
+            if self._receipt_matches_event(governance_call_id, receipt, event_record, event_type=event_type):
+                receipt_node_id = self._record_node_id("receipt", receipt_id, {})
+                self.conversation_engine.write.add_edge(
+                    governance_edge(
+                        edge_id=f"govreceipt|{governance_call_id}|{receipt_id}|{event_node_id}",
+                        source_id=receipt_node_id,
+                        target_id=event_node_id,
+                        relation="receipt_for",
+                        label="receipt_for",
+                        summary=f"Receipt {receipt_id} captured source input for {event_type}",
+                        doc_id=STORE_DOC_IDS["receipts"],
+                        metadata={
+                            "entity_type": "governance_edge",
+                            "governance_call_id": governance_call_id,
+                            "receipt_id": receipt_id,
+                            "event_type": event_type,
+                        },
+                    )
+                )
+
+    def _receipt_matches_event(
+        self,
+        governance_call_id: str,
+        receipt: IntegrationReceiptRow,
+        event_record: CanonicalGovernanceEventRow,
+        *,
+        event_type: str,
+    ) -> bool:
+        source_event_type = str(receipt.get("sourceEventType") or "")
+        if source_event_type == "before_tool_call" and event_type == "governance.tool_call_observed.v1":
+            return self._receipt_governance_call_id(receipt) == governance_call_id
+        if (
+            source_event_type == "after_tool_call"
+            and event_type == "governance.execution_suspended.v1"
+            and self._receipt_is_approval_pending_after_tool_call(receipt)
+        ):
+            return self._receipt_governance_call_id(receipt) == governance_call_id
+        if source_event_type == "after_tool_call" and event_type == "governance.tool_call_completed.v1":
+            return self._receipt_governance_call_id(receipt) == governance_call_id
+        if source_event_type == "approval_resolution" and event_type == "governance.approval_resolved.v1":
+            receipt_payload = receipt.get("payload")
+            payload_data = receipt_payload if isinstance(receipt_payload, dict) else {}
+            subject = event_record.get("subject")
+            subject_data = subject if isinstance(subject, dict) else {}
+            return payload_data.get("approvalId") == subject_data.get("approvalRequestId")
+        return False
+
+    @staticmethod
+    def _receipt_governance_call_id(receipt: IntegrationReceiptRow) -> str | None:
+        payload = receipt.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        raw_event = payload.get("rawEvent")
+        raw_event_data = raw_event if isinstance(raw_event, dict) else {}
+        return stable_governance_call_id(
+            [
+                GovernanceService._as_optional_str(payload.get("pluginId")),
+                GovernanceService._as_optional_str(payload.get("sessionId")),
+                GovernanceService._as_optional_str(payload.get("toolName")),
+                GovernanceService._as_optional_str(raw_event_data.get("runId")),
+                GovernanceService._as_optional_str(raw_event_data.get("toolCallId")),
+            ]
+        )
+
+    @staticmethod
+    def _receipt_is_approval_pending_after_tool_call(receipt: IntegrationReceiptRow) -> bool:
+        payload = receipt.get("payload")
+        if not isinstance(payload, dict):
+            return False
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return False
+        details = result.get("details")
+        if not isinstance(details, dict):
+            return False
+        status = details.get("status")
+        if not isinstance(status, str):
+            return False
+        return status.strip().lower().replace("_", "-") == "approval-pending"
+
+    @staticmethod
+    def _as_optional_str(value: Any) -> str | None:
+        return value if isinstance(value, str) and value else None
+
+    def _link_semantic_events(
+        self,
+        *,
+        governance_call_id: str,
+        source_event_id: str,
+        target_event_id: str,
+        relation: str,
+        summary: str,
+    ) -> None:
+        source_node_id = self._record_node_id("event", source_event_id, {})
+        target_node_id = self._record_node_id("event", target_event_id, {})
+        if not self._node_exists(source_node_id) or not self._node_exists(target_node_id):
+            return
+        edge_id = f"govevent|{governance_call_id}|edge|{source_event_id}->{target_event_id}|{relation}"
+        self.conversation_engine.write.add_edge(
+            governance_edge(
+                edge_id=edge_id,
+                source_id=source_node_id,
+                target_id=target_node_id,
+                relation=relation,
+                label=relation,
+                summary=summary,
+                doc_id=BACKBONE_DOC_ID,
+                metadata={
+                    "entity_type": "governance_edge",
+                    "governance_call_id": governance_call_id,
+                    "source_event_id": source_event_id,
+                    "target_event_id": target_event_id,
+                },
+            )
+        )
+
+    def _reconcile_semantic_event_relations(self, governance_call_id: str) -> None:
+        for record in self.list_records("event"):
+            subject = record.get("subject")
+            subject_data = subject if isinstance(subject, dict) else {}
+            if subject_data.get("governanceCallId") != governance_call_id:
+                continue
+            event_id = record.get("eventId")
+            if not isinstance(event_id, str) or not event_id:
+                continue
+            self._persist_semantic_event_relations(
+                governance_call_id,
+                record,
+                event_node_id=self._record_node_id("event", event_id, {}),
+            )
+
+    def _node_exists(self, node_id: str) -> bool:
+        backend = getattr(self.conversation_engine, "backend", None)
+        if backend is None or not hasattr(backend, "node_get"):
+            return True
+        try:
+            got = backend.node_get(ids=[node_id], include=[])
+        except Exception:
+            return False
+        ids = got.get("ids") if isinstance(got, dict) else None
+        return bool(ids and ids[0] == node_id)
+
+    def _find_event_id(
+        self,
+        *,
+        governance_call_id: str,
+        event_type: str,
+        approval_request_id: str | None = None,
+    ) -> str | None:
+        matches: list[tuple[str, str]] = []
+        for record in self.list_records("event"):
+            if record.get("eventType") != event_type:
+                continue
+            subject = record.get("subject")
+            subject_data = subject if isinstance(subject, dict) else {}
+            if subject_data.get("governanceCallId") != governance_call_id:
+                continue
+            if approval_request_id is not None and subject_data.get("approvalRequestId") != approval_request_id:
+                continue
+            event_id = record.get("eventId")
+            recorded_at = str(record.get("recordedAt") or record.get("occurredAt") or "")
+            if isinstance(event_id, str):
+                matches.append((recorded_at, event_id))
+        if not matches:
+            return None
+        matches.sort()
+        return matches[-1][1]
+
+    def _persist_backbone_for_event(
+        self,
+        governance_call_id: str,
+        event_record: CanonicalGovernanceEventRow,
+    ) -> tuple[str | None, str | None]:
+        """Persist the operator-facing backbone chain and return the event anchor."""
         event_type = str(event_record["eventType"])
         if event_type == "governance.tool_call_observed.v1":
             self._ensure_backbone_transition(governance_call_id, "waiting_input", "input_received")
-            self._link_event_to_backbone(governance_call_id, event_node_id, "input_received", "governance_observed_at")
-            return
+            return "input_received", "governance_observed_at"
 
         if event_type == "governance.decision_recorded.v1":
             disposition = str(event_record.get("data", {}).get("disposition") or "")
@@ -834,37 +1172,57 @@ class GovernanceService:
                 "require_approval": "require_approval",
             }.get(disposition, "decision_recorded")
             self._ensure_backbone_transition(governance_call_id, "input_received", step)
-            self._link_event_to_backbone(governance_call_id, event_node_id, step, "governance_decision_at")
-            return
+            return step, "governance_decision_at"
 
         if event_type == "governance.approval_requested.v1":
             self._ensure_backbone_transition(governance_call_id, "require_approval", "waiting_approval")
-            self._link_event_to_backbone(governance_call_id, event_node_id, "waiting_approval", "governance_approval_requested_at")
-            return
+            return "waiting_approval", "governance_approval_requested_at"
 
         if event_type == "governance.execution_suspended.v1":
             self._ensure_backbone_transition(governance_call_id, "waiting_approval", "approval_suspended")
-            self._link_event_to_backbone(governance_call_id, event_node_id, "approval_suspended", "governance_suspended_at")
-            return
+            return "approval_suspended", "governance_suspended_at"
 
         if event_type == "governance.approval_resolved.v1":
             self._ensure_backbone_transition(governance_call_id, "approval_suspended", "approval_received")
-            self._link_event_to_backbone(governance_call_id, event_node_id, "approval_received", "governance_approval_resolved_at")
-            return
+            return "approval_received", "governance_approval_resolved_at"
 
         if event_type == "governance.execution_resumed.v1":
-            self._ensure_backbone_transition(governance_call_id, "approval_received", "waiting_output")
-            self._link_event_to_backbone(governance_call_id, event_node_id, "waiting_output", "governance_resumed_at")
-            return
+            self._ensure_backbone_transition(governance_call_id, "approval_received", "governance_resolved")
+            return "governance_resolved", "governance_resumed_at"
 
         if event_type == "governance.execution_denied.v1":
-            self._ensure_backbone_transition(governance_call_id, "approval_received", "policy_rejected")
-            self._link_event_to_backbone(governance_call_id, event_node_id, "policy_rejected", "governance_denied_at")
-            return
+            self._ensure_backbone_transition(governance_call_id, "approval_received", "governance_resolved")
+            return "governance_resolved", "governance_denied_at"
+
+        if event_type == "governance.result_recorded.v1":
+            final_disposition = str(event_record.get("data", {}).get("finalDisposition") or "")
+            if final_disposition == "allow":
+                predecessor = "approval_received" if self._find_event_id(
+                    governance_call_id=governance_call_id,
+                    event_type="governance.approval_resolved.v1",
+                ) else "policy_approved"
+                self._ensure_backbone_transition(governance_call_id, predecessor, "governance_resolved")
+            else:
+                predecessor = "approval_received" if self._find_event_id(
+                    governance_call_id=governance_call_id,
+                    event_type="governance.approval_resolved.v1",
+                ) else "policy_rejected"
+                self._ensure_backbone_transition(governance_call_id, predecessor, "governance_resolved")
+            return "governance_resolved", "governance_result_recorded_at"
+
+        if event_type == "governance.completed.v1":
+            final_disposition = str(event_record.get("data", {}).get("finalDisposition") or "")
+            if final_disposition == "allow":
+                self._ensure_backbone_transition(governance_call_id, "governance_resolved", "waiting_output")
+                return "governance_resolved", "governance_completed_at"
+            self._ensure_backbone_transition(governance_call_id, "governance_resolved", "run_completed")
+            return "run_completed", "governance_completed_at"
 
         if event_type == "governance.tool_call_completed.v1":
             self._ensure_backbone_transition(governance_call_id, "waiting_output", "output_received")
-            self._link_event_to_backbone(governance_call_id, event_node_id, "output_received", "governance_completed_at")
+            self._ensure_backbone_transition(governance_call_id, "output_received", "run_completed")
+            return "run_completed", "tool_execution_completed_at"
+        return None, None
 
     def _ensure_backbone_transition(self, governance_call_id: str, from_step: str, to_step: str) -> None:
         from_id = self._ensure_backbone_step(governance_call_id, from_step)

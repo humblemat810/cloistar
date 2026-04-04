@@ -32,6 +32,7 @@ DEFAULT_NODE_BIN="$HOME/.nvm/versions/node/v22.22.2/bin/node"
 DEFAULT_NPM_CLI_JS="$HOME/.nvm/versions/node/v22.22.2/lib/node_modules/npm/bin/npm-cli.js"
 THREE_TERMINAL_SCRIPT="$ROOT_DIR/scripts/run-openclaw-governance-three-terminal.py"
 DEMO_TRACE_PLUGIN_DIR="$ROOT_DIR/openclaw-demo-trace-plugin"
+CDC_SCRIPT="$ROOT_DIR/kogwistar/scripts/claw_runtime_loop.py"
 
 NODE_BIN="${NODE_BIN:-$DEFAULT_NODE_BIN}"
 NPM_CLI_JS="${NPM_CLI_JS:-$DEFAULT_NPM_CLI_JS}"
@@ -56,6 +57,9 @@ SKIP_PLUGIN_INSTALL=0
 WAIT_FOREVER=1
 GATEWAY_VERBOSE=1
 DEMO_PROBE=0
+DEMO_CDC=0
+CDC_PORT=""
+CDC_PAGE_PORT=""
 
 usage() {
   cat <<'EOF'
@@ -76,6 +80,7 @@ Options:
   --demo-case NAME            Auto-run a demo agent turn: allow | block | approval
   --approval-mode NAME        Approval behavior for the approval demo: auto-allow | auto-deny | llm
   --demo-probe               Start the bridge through the demo approval probe launcher.
+  --demo-cdc                 Start a fresh Kogwistar CDC bridge and hosted workflow/conversation viewer pages.
   --message TEXT              Optional OpenClaw agent message to run after startup.
   --session-id ID             Session id to use with --message. Default: governance-e2e
   --skip-plugin-build         Reuse the existing plugin dist/ output.
@@ -91,6 +96,7 @@ Examples:
   ./scripts/run-openclaw-gateway-governance-e2e.sh --ollama-model qwen3:4b --demo-case approval
   ./scripts/run-openclaw-gateway-governance-e2e.sh --stable-run-dir --demo-probe --demo-case approval
   ./scripts/run-openclaw-gateway-governance-e2e.sh --stable-run-dir --demo-probe --demo-case approval --approval-mode llm
+  ./scripts/run-openclaw-gateway-governance-e2e.sh --stable-run-dir --demo-probe --demo-cdc --demo-case approval --approval-mode llm
   PLUGIN_INSPECT_TIMEOUT=5s ./scripts/run-openclaw-gateway-governance-e2e.sh --plugin-inspect-timeout 10s
   ./scripts/run-openclaw-gateway-governance-e2e.sh --message "Use the read tool (not exec) to read proof.txt and reply with the exact contents only."
   ./scripts/run-openclaw-gateway-governance-e2e.sh --use-existing-bridge --bridge-url http://127.0.0.1:8788
@@ -229,6 +235,10 @@ while [[ $# -gt 0 ]]; do
       DEMO_PROBE=1
       shift
       ;;
+    --demo-cdc)
+      DEMO_CDC=1
+      shift
+      ;;
     --message)
       MESSAGE="${2:-}"
       shift 2
@@ -275,6 +285,11 @@ if [[ "$STABLE_RUN_DIR" == "1" && -n "$RUN_DIR" ]]; then
   exit 2
 fi
 
+if [[ "$DEMO_CDC" == "1" && "$USE_EXISTING_BRIDGE" == "1" ]]; then
+  echo "ERROR: --demo-cdc is not supported with --use-existing-bridge because CDC_PUBLISH_ENDPOINT must be injected before the local bridge starts" >&2
+  exit 2
+fi
+
 case "$DEMO_CASE" in
   "")
     ;;
@@ -317,6 +332,9 @@ require_file "$BRIDGE_PYTHON" "missing bridge venv python"
 require_file "$OPENCLAW_ENTRY" "missing OpenClaw entrypoint"
 require_file "$NODE_BIN" "missing Node 22 binary"
 require_file "$NPM_CLI_JS" "missing npm CLI entrypoint"
+if [[ "$DEMO_CDC" == "1" ]]; then
+  require_file "$CDC_SCRIPT" "missing Kogwistar CDC helper script"
+fi
 
 if [[ -z "$OLLAMA_URL" ]]; then
   OLLAMA_URL="http://127.0.0.1:11434"
@@ -363,6 +381,14 @@ AGENT_STDERR_LOG="$RUN_DIR/logs/agent.stderr.log"
 APPROVER_STDOUT_LOG="$RUN_DIR/logs/approver.stdout.log"
 APPROVER_STDERR_LOG="$RUN_DIR/logs/approver.stderr.log"
 DEMO_APPROVAL_TRACE_LOG="$RUN_DIR/logs/demo-approval-trace.jsonl"
+CDC_ROOT_DIR="$RUN_DIR/cdc"
+CDC_DATA_DIR="$CDC_ROOT_DIR/render-data"
+CDC_PAGES_DIR="$CDC_ROOT_DIR/pages"
+CDC_OPLOG_DIR="$CDC_ROOT_DIR/oplog"
+CDC_OPLOG_FILE="$CDC_OPLOG_DIR/cdc_oplog.jsonl"
+CDC_BRIDGE_LOG="$RUN_DIR/logs/cdc-bridge.log"
+CDC_PAGE_LOG="$RUN_DIR/logs/cdc-pages.log"
+CDC_RENDER_LOG="$RUN_DIR/logs/cdc-render.log"
 
 if [[ -z "$BRIDGE_PORT" ]]; then
   BRIDGE_PORT="$(pick_free_port)"
@@ -370,11 +396,34 @@ fi
 if [[ -z "$GATEWAY_PORT" ]]; then
   GATEWAY_PORT="$(pick_free_port)"
 fi
+if [[ "$DEMO_CDC" == "1" && -z "$CDC_PORT" ]]; then
+  CDC_PORT="$(pick_free_port)"
+fi
+if [[ "$DEMO_CDC" == "1" && -z "$CDC_PAGE_PORT" ]]; then
+  CDC_PAGE_PORT="$(pick_free_port)"
+fi
 
 if [[ "$USE_EXISTING_BRIDGE" == "1" ]]; then
   BRIDGE_URL="${BRIDGE_URL:-http://127.0.0.1:8788}"
 else
   BRIDGE_URL="http://127.0.0.1:${BRIDGE_PORT}"
+fi
+
+CDC_BRIDGE_URL=""
+CDC_WS_URL=""
+CDC_PAGE_BASE_URL=""
+CDC_WORKFLOW_PAGE_URL=""
+CDC_CONVERSATION_PAGE_URL=""
+CDC_PUBLISH_ENDPOINT_VALUE=""
+CDC_INGEST_URL=""
+if [[ "$DEMO_CDC" == "1" ]]; then
+  CDC_BRIDGE_URL="http://127.0.0.1:${CDC_PORT}"
+  CDC_WS_URL="ws://127.0.0.1:${CDC_PORT}/changes/ws"
+  CDC_PAGE_BASE_URL="http://127.0.0.1:${CDC_PAGE_PORT}"
+  CDC_WORKFLOW_PAGE_URL="$CDC_PAGE_BASE_URL/workflow.bundle.html"
+  CDC_CONVERSATION_PAGE_URL="$CDC_PAGE_BASE_URL/conversation.bundle.html"
+  CDC_PUBLISH_ENDPOINT_VALUE="$CDC_BRIDGE_URL"
+  CDC_INGEST_URL="$CDC_BRIDGE_URL/ingest"
 fi
 
 export CONFIG_PATH BRIDGE_URL WORKSPACE_DIR OPENCLAW_FILE_LOG OLLAMA_MODEL OLLAMA_URL OLLAMA_API_KEY GATEWAY_PORT
@@ -512,11 +561,15 @@ BRIDGE_PID=""
 GATEWAY_PID=""
 AGENT_PID=""
 APPROVER_PID=""
+CDC_BRIDGE_PID=""
+CDC_PAGE_PID=""
 
 cleanup() {
   local exit_code="$1"
   stop_process "$GATEWAY_PID" "gateway"
   stop_process "$BRIDGE_PID" "bridge"
+  stop_process "$CDC_PAGE_PID" "cdc page server"
+  stop_process "$CDC_BRIDGE_PID" "cdc bridge"
 
   cat <<EOF
 
@@ -536,6 +589,17 @@ Most useful evidence files:
   OpenClaw JSONL: $OPENCLAW_FILE_LOG
   bridge state:   $BRIDGE_URL/debug/state
 EOF
+  if [[ "$DEMO_CDC" == "1" ]]; then
+    cat <<EOF
+  cdc ingest:     $CDC_INGEST_URL
+  cdc publish base:$CDC_PUBLISH_ENDPOINT_VALUE
+  cdc websocket:  $CDC_WS_URL
+  cdc workflow:   $CDC_WORKFLOW_PAGE_URL
+  cdc conversation:$CDC_CONVERSATION_PAGE_URL
+  cdc oplog:      $CDC_OPLOG_FILE
+  cdc pages dir:  $CDC_PAGES_DIR
+EOF
+  fi
   exit "$exit_code"
 }
 
@@ -549,6 +613,81 @@ if [[ "$SKIP_PLUGIN_BUILD" != "1" ]]; then
     cd "$PLUGIN_DIR"
     run_clean_node "$NODE_BIN" "$NPM_CLI_JS" run build
   ) >"$PLUGIN_BUILD_LOG" 2>&1
+fi
+
+if [[ "$DEMO_CDC" == "1" ]]; then
+  log_step "Resetting CDC artifacts under $CDC_ROOT_DIR"
+  rm -rf "$CDC_ROOT_DIR"
+  mkdir -p "$CDC_OPLOG_DIR" "$CDC_PAGES_DIR" "$CDC_DATA_DIR"
+
+  log_step "Starting Kogwistar CDC bridge on port $CDC_PORT"
+  "$BRIDGE_PYTHON" "$CDC_SCRIPT" run-cdc-bridge \
+    --data-dir "$CDC_DATA_DIR" \
+    --host 127.0.0.1 \
+    --port "$CDC_PORT" \
+    --oplog-file "$CDC_OPLOG_FILE" \
+    --reset-oplog \
+    >"$CDC_BRIDGE_LOG" 2>&1 &
+  CDC_BRIDGE_PID="$!"
+
+  if ! wait_for_http_ok "$CDC_BRIDGE_URL/docs" 20; then
+    echo "ERROR: CDC bridge failed to become healthy at $CDC_BRIDGE_URL" >&2
+    exit 1
+  fi
+
+  log_step "Rendering fresh CDC viewer pages"
+  env \
+    CDC_PAGES_DIR="$CDC_PAGES_DIR" \
+    CDC_WS_URL="$CDC_WS_URL" \
+    ROOT_DIR="$ROOT_DIR" \
+    "$BRIDGE_PYTHON" - <<'PY' >"$CDC_RENDER_LOG" 2>&1
+from pathlib import Path
+import json
+import os
+import sys
+
+root = Path(os.environ["ROOT_DIR"])
+sys.path.insert(0, str(root / "kogwistar"))
+
+from kogwistar.utils.kge_debug_dump import dump_paired_bundles
+
+out_dir = Path(os.environ["CDC_PAGES_DIR"])
+template_html = (root / "kogwistar" / "kogwistar" / "templates" / "d3.html").read_text(
+    encoding="utf-8"
+)
+meta = dump_paired_bundles(
+    kg_engine=None,
+    conversation_engine=None,
+    workflow_engine=None,
+    template_html=template_html,
+    out_dir=out_dir,
+    cdc_ws_url=os.environ["CDC_WS_URL"],
+    embed_empty=True,
+)
+print(
+    json.dumps(
+        {
+            "ok": True,
+            "out_dir": str(out_dir.resolve()),
+            "workflow_bundle": str((out_dir / "workflow.bundle.html").resolve()),
+            "conversation_bundle": str((out_dir / "conversation.bundle.html").resolve()),
+            "meta": meta,
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+)
+PY
+
+  log_step "Starting local CDC page server on port $CDC_PAGE_PORT"
+  "$BRIDGE_PYTHON" -m http.server "$CDC_PAGE_PORT" --bind 127.0.0.1 --directory "$CDC_PAGES_DIR" \
+    >"$CDC_PAGE_LOG" 2>&1 &
+  CDC_PAGE_PID="$!"
+
+  if ! wait_for_http_ok "$CDC_WORKFLOW_PAGE_URL" 20; then
+    echo "ERROR: CDC workflow page did not become available at $CDC_WORKFLOW_PAGE_URL" >&2
+    exit 1
+  fi
 fi
 
 if [[ "$USE_EXISTING_BRIDGE" == "1" ]]; then
@@ -570,6 +709,7 @@ else
       OPENCLAW_HOME="$HOME_DIR" \
       HOME="$HOME_DIR" \
       PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+      ${CDC_PUBLISH_ENDPOINT_VALUE:+CDC_PUBLISH_ENDPOINT="$CDC_PUBLISH_ENDPOINT_VALUE"} \
       DEMO_APPROVAL_PROBE=1 \
       DEMO_APPROVAL_TRACE_FILE="$DEMO_APPROVAL_TRACE_LOG" \
       "$BRIDGE_PYTHON" -m bridge.app.demo.launch_bridge_with_probe --host 127.0.0.1 --port "$BRIDGE_PORT" \
@@ -585,6 +725,7 @@ else
       OPENCLAW_HOME="$HOME_DIR" \
       HOME="$HOME_DIR" \
       PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+      ${CDC_PUBLISH_ENDPOINT_VALUE:+CDC_PUBLISH_ENDPOINT="$CDC_PUBLISH_ENDPOINT_VALUE"} \
       "$BRIDGE_PYTHON" -m uvicorn bridge.app.main:app --host 127.0.0.1 --port "$BRIDGE_PORT" \
       >"$BRIDGE_STDOUT_LOG" 2>"$BRIDGE_STDERR_LOG" &
   fi
@@ -694,6 +835,15 @@ Evidence files:
   gateway stderr: $GATEWAY_STDERR_LOG
   OpenClaw JSONL: $OPENCLAW_FILE_LOG
 EOF
+if [[ "$DEMO_CDC" == "1" ]]; then
+  cat <<EOF
+  cdc bridge log: $CDC_BRIDGE_LOG
+  cdc render log: $CDC_RENDER_LOG
+  cdc page log:   $CDC_PAGE_LOG
+  cdc oplog:      $CDC_OPLOG_FILE
+  cdc pages dir:  $CDC_PAGES_DIR
+EOF
+fi
 
 cat <<EOF
 
@@ -730,6 +880,18 @@ Approval note:
   Then resolve it with:
     env -u NODE_OPTIONS -u VSCODE_INSPECTOR_OPTIONS -u VSCODE_DEBUGPY_ADAPTER_ENDPOINTS -u ELECTRON_RUN_AS_NODE OPENCLAW_CONFIG_PATH="$CONFIG_PATH" OPENCLAW_STATE_DIR="$STATE_DIR" HOME="$HOME_DIR" "$NODE_BIN" "$OPENCLAW_ENTRY" gateway call plugin.approval.resolve --params '{"id":"plugin:<uuid>","decision":"allow-once"}'
 EOF
+
+if [[ "$DEMO_CDC" == "1" ]]; then
+  cat <<EOF
+
+CDC viewer links:
+  workflow page:     $CDC_WORKFLOW_PAGE_URL
+  conversation page: $CDC_CONVERSATION_PAGE_URL
+  websocket stream:  $CDC_WS_URL
+  ingest endpoint:   $CDC_INGEST_URL
+  publish base URL:  $CDC_PUBLISH_ENDPOINT_VALUE
+EOF
+fi
 
   if [[ -n "$MESSAGE" ]]; then
     if [[ -n "$DEMO_CASE" ]]; then
@@ -768,13 +930,39 @@ EOF
     if [[ -n "$APPROVER_PID" ]]; then
       wait "$APPROVER_PID" || true
     fi
+    approval_flow_triggered="0"
     if [[ -f "$DEMO_APPROVAL_TRACE_LOG" ]]; then
-      if grep -q 'tool.call.rendered_as_text' "$DEMO_APPROVAL_TRACE_LOG"; then
-        echo "Demo trace warning: the model emitted tool-like plain text instead of a real tool call."
+      if grep -q '"event":"gateway.approval.requested"' "$DEMO_APPROVAL_TRACE_LOG"; then
+        approval_flow_triggered="1"
+        echo "Demo trace summary: approval flow was triggered."
+      elif grep -q '"event":"tool.before"' "$DEMO_APPROVAL_TRACE_LOG"; then
+        echo "Demo trace summary: a real tool call happened, but no approval flow was triggered."
+      elif grep -q 'tool.call.rendered_as_text' "$DEMO_APPROVAL_TRACE_LOG"; then
+        echo "Demo trace summary: no real tool call happened, so no approval flow was triggered."
+        echo "Reason: the model emitted tool-like plain text instead of invoking the tool."
         echo "Check $DEMO_APPROVAL_TRACE_LOG for event tool.call.rendered_as_text."
       elif grep -q 'tool.call.not_used' "$DEMO_APPROVAL_TRACE_LOG"; then
-        echo "Demo trace warning: no real tool hook fired during the run."
+        echo "Demo trace summary: no real tool call happened, so no approval flow was triggered."
+        echo "Reason: no actual tool hook fired during the run."
         echo "Check $DEMO_APPROVAL_TRACE_LOG for event tool.call.not_used."
+      else
+        echo "Demo trace summary: no tool-call evidence was found, so no approval flow was triggered."
+      fi
+    fi
+    if [[ "$approval_flow_triggered" == "1" ]]; then
+      governance_completed_found="0"
+      if [[ -f "$CDC_OPLOG_FILE" ]] && grep -q 'governance.completed.v1' "$CDC_OPLOG_FILE"; then
+        governance_completed_found="1"
+      elif curl -fsS "$BRIDGE_URL/debug/state" 2>/dev/null | "$BRIDGE_PYTHON" -c 'import json,sys; data=json.load(sys.stdin); print("yes" if any(event.get("eventType") == "governance.completed.v1" for event in data.get("events", [])) else "no")' | grep -q '^yes$'; then
+        governance_completed_found="1"
+      fi
+      if [[ "$governance_completed_found" != "1" ]]; then
+        echo "HARD WARNING: approval flow triggered, but governance.completed.v1 was never observed."
+        if [[ -f "$CDC_OPLOG_FILE" ]]; then
+          echo "Check $CDC_OPLOG_FILE and $BRIDGE_URL/debug/state for an incomplete governance graph."
+        else
+          echo "Check $BRIDGE_URL/debug/state for an incomplete governance graph."
+        fi
       fi
     fi
 
