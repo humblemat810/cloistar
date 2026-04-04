@@ -81,11 +81,30 @@ DEFAULT_BLOCK_PROMPT = (
     "Do not choose a different command."
 )
 APPROVAL_MODES = {"auto-allow", "auto-deny", "manual", "llm"}
+DEMO_APPROVAL_TRACE_FILE_ENV = "DEMO_APPROVAL_TRACE_FILE"
 
 
 def prefixed_print(prefix: str, message: str) -> None:
     sys.stdout.write(f"[{prefix}] {message}\n")
     sys.stdout.flush()
+
+
+def append_demo_trace(run_dir: Path, event: str, **record: Any) -> None:
+    trace_path = os.getenv(DEMO_APPROVAL_TRACE_FILE_ENV)
+    if trace_path:
+        path = Path(trace_path)
+    else:
+        path = run_dir / "logs" / "demo-approval-trace.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
+        "kind": "demo_probe",
+        "event": event,
+        **record,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True, default=str))
+        handle.write("\n")
 
 
 def json_get(url: str, timeout: float = 2.0) -> dict:
@@ -527,6 +546,15 @@ def role_approver(args: argparse.Namespace) -> int:
     agent_pid = args.agent_pid
     approval_mode = args.approval_mode
     best_effort_pair(run_dir)
+    if approval_mode == "llm":
+        append_demo_trace(
+            run_dir,
+            "llm.approval.mode.selected",
+            module=__name__,
+            function="role_approver",
+            sessionId=session_id,
+            approvalMode=approval_mode,
+        )
     seen_plugin_ids: set[str] = set()
     seen_exec_ids: set[str] = set()
     saw_anything = False
@@ -571,6 +599,17 @@ def role_approver(args: argparse.Namespace) -> int:
                     command=None,
                     summary=str((approval_row.get("projection") or {}).get("description") or ""),
                 )
+                if approval_mode == "llm":
+                    append_demo_trace(
+                        run_dir,
+                        "llm.approval.decision.chosen",
+                        module=__name__,
+                        function="role_approver",
+                        sessionId=session_id,
+                        approvalKind="plugin",
+                        approvalId=gateway_approval_id,
+                        decision=decision,
+                    )
                 result = resolve_gateway_method(
                     run_dir,
                     "plugin.approval.resolve",
@@ -615,6 +654,17 @@ def role_approver(args: argparse.Namespace) -> int:
                     command=details.get("command"),
                     summary=str((payload.get("result") or {}).get("content", [{}])[0].get("text", "")),
                 )
+                if approval_mode == "llm":
+                    append_demo_trace(
+                        run_dir,
+                        "llm.approval.decision.chosen",
+                        module=__name__,
+                        function="role_approver",
+                        sessionId=session_id,
+                        approvalKind="exec",
+                        approvalId=exec_approval_id,
+                        decision=decision,
+                    )
                 result = resolve_gateway_method(
                     run_dir,
                     "exec.approval.resolve",

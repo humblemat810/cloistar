@@ -84,7 +84,8 @@ bash scripts/run-openclaw-gateway-governance-e2e.sh \
   --stable-run-dir \
   --demo-probe \
   --ollama-model qwen3:4b \
-  --demo-case approval
+  --demo-case approval \
+  --approval-mode llm
 ```
 
 That writes a demo-focused trace file at:
@@ -964,3 +965,9 @@ OPENCLAW_EXISTING_RUN_DIR=/home/azureuser/cloistar/.tmp/openclaw-gateway-e2e/cur
 - [run-openclaw-gateway-governance-e2e.sh](/home/azureuser/cloistar/scripts/run-openclaw-gateway-governance-e2e.sh)
 - [manual-governance-smoke.mjs](/home/azureuser/cloistar/scripts/manual-governance-smoke.mjs)
 - [openclaw-bridge-e2e-status.md](/home/azureuser/cloistar/openclaw-bridge-e2e-status.md)
+## Quick Lookup
+
+- [Demo probe + LLM approval run](#llm-approval-demo)
+- [Demo probe setup](#demo-probe)
+- [Manual approval path](#human-approval-demo)
+- [Self-starting approval path](#self-starting-approval-demo)

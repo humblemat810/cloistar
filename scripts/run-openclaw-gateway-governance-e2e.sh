@@ -30,6 +30,7 @@ OPENCLAW_ENTRY="$OPENCLAW_DIR/openclaw.mjs"
 
 DEFAULT_NODE_BIN="$HOME/.nvm/versions/node/v22.22.2/bin/node"
 DEFAULT_NPM_CLI_JS="$HOME/.nvm/versions/node/v22.22.2/lib/node_modules/npm/bin/npm-cli.js"
+THREE_TERMINAL_SCRIPT="$ROOT_DIR/scripts/run-openclaw-governance-three-terminal.py"
 
 NODE_BIN="${NODE_BIN:-$DEFAULT_NODE_BIN}"
 NPM_CLI_JS="${NPM_CLI_JS:-$DEFAULT_NPM_CLI_JS}"
@@ -44,6 +45,7 @@ STABLE_RUN_DIR=0
 MESSAGE=""
 SESSION_ID="governance-e2e"
 DEMO_CASE=""
+APPROVAL_MODE=""
 OLLAMA_URL=""
 OLLAMA_MODEL=""
 OLLAMA_API_KEY="ollama-local"
@@ -71,6 +73,7 @@ Options:
   --ollama-api-key VALUE      Placeholder auth value for Ollama. Default: ollama-local
   --plugin-inspect-timeout D  Timeout for best-effort 'plugins inspect'. Default: \$PLUGIN_INSPECT_TIMEOUT or 20s
   --demo-case NAME            Auto-run a demo agent turn: allow | block | approval
+  --approval-mode NAME        Approval behavior for the approval demo: auto-allow | auto-deny | llm
   --demo-probe               Start the bridge through the demo approval probe launcher.
   --message TEXT              Optional OpenClaw agent message to run after startup.
   --session-id ID             Session id to use with --message. Default: governance-e2e
@@ -86,6 +89,7 @@ Examples:
   ./scripts/run-openclaw-gateway-governance-e2e.sh --ollama-model glm-4.7-flash
   ./scripts/run-openclaw-gateway-governance-e2e.sh --ollama-model qwen3:4b --demo-case approval
   ./scripts/run-openclaw-gateway-governance-e2e.sh --stable-run-dir --demo-probe --demo-case approval
+  ./scripts/run-openclaw-gateway-governance-e2e.sh --stable-run-dir --demo-probe --demo-case approval --approval-mode llm
   PLUGIN_INSPECT_TIMEOUT=5s ./scripts/run-openclaw-gateway-governance-e2e.sh --plugin-inspect-timeout 10s
   ./scripts/run-openclaw-gateway-governance-e2e.sh --message "Use the read tool (not exec) to read proof.txt and reply with the exact contents only."
   ./scripts/run-openclaw-gateway-governance-e2e.sh --use-existing-bridge --bridge-url http://127.0.0.1:8788
@@ -216,6 +220,10 @@ while [[ $# -gt 0 ]]; do
       DEMO_CASE="${2:-}"
       shift 2
       ;;
+    --approval-mode)
+      APPROVAL_MODE="${2:-}"
+      shift 2
+      ;;
     --demo-probe)
       DEMO_PROBE=1
       shift
@@ -284,6 +292,26 @@ case "$DEMO_CASE" in
     ;;
 esac
 
+case "$APPROVAL_MODE" in
+  "")
+    ;;
+  auto-allow|auto-deny|llm)
+    ;;
+  manual)
+    echo "ERROR: --approval-mode manual is not supported by this helper; use scripts/run-openclaw-governance-three-terminal.py for interactive approval mode." >&2
+    exit 2
+    ;;
+  *)
+    echo "ERROR: --approval-mode must be one of: auto-allow, auto-deny, llm" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -n "$APPROVAL_MODE" && "$DEMO_CASE" != "approval" ]]; then
+  echo "ERROR: --approval-mode is only valid with --demo-case approval" >&2
+  exit 2
+fi
+
 require_file "$BRIDGE_PYTHON" "missing bridge venv python"
 require_file "$OPENCLAW_ENTRY" "missing OpenClaw entrypoint"
 require_file "$NODE_BIN" "missing Node 22 binary"
@@ -330,6 +358,9 @@ GATEWAY_STDOUT_LOG="$RUN_DIR/logs/gateway.stdout.log"
 GATEWAY_STDERR_LOG="$RUN_DIR/logs/gateway.stderr.log"
 OPENCLAW_FILE_LOG="$RUN_DIR/logs/openclaw.jsonl"
 AGENT_OUTPUT_JSON="$RUN_DIR/agent-output.json"
+AGENT_STDERR_LOG="$RUN_DIR/logs/agent.stderr.log"
+APPROVER_STDOUT_LOG="$RUN_DIR/logs/approver.stdout.log"
+APPROVER_STDERR_LOG="$RUN_DIR/logs/approver.stderr.log"
 DEMO_APPROVAL_TRACE_LOG="$RUN_DIR/logs/demo-approval-trace.jsonl"
 
 if [[ -z "$BRIDGE_PORT" ]]; then
@@ -441,6 +472,10 @@ if [[ -n "$DEMO_CASE" && -z "$MESSAGE" ]]; then
   esac
 fi
 
+if [[ "$DEMO_CASE" == "approval" && -z "$APPROVAL_MODE" ]]; then
+  APPROVAL_MODE="auto-allow"
+fi
+
 openclaw_env=(
   "HOME=$HOME_DIR"
   "OPENCLAW_HOME=$HOME_DIR"
@@ -471,6 +506,8 @@ openclaw() {
 
 BRIDGE_PID=""
 GATEWAY_PID=""
+AGENT_PID=""
+APPROVER_PID=""
 
 cleanup() {
   local exit_code="$1"
@@ -487,6 +524,9 @@ Most useful evidence files:
   bridge stdout:  $BRIDGE_STDOUT_LOG
   bridge stderr:  $BRIDGE_STDERR_LOG
   demo trace:     $DEMO_APPROVAL_TRACE_LOG
+  agent stderr:   $AGENT_STDERR_LOG
+  approver stdout:$APPROVER_STDOUT_LOG
+  approver stderr:$APPROVER_STDERR_LOG
   gateway stdout: $GATEWAY_STDOUT_LOG
   gateway stderr: $GATEWAY_STDERR_LOG
   OpenClaw JSONL: $OPENCLAW_FILE_LOG
@@ -683,22 +723,46 @@ Approval note:
     env -u NODE_OPTIONS -u VSCODE_INSPECTOR_OPTIONS -u VSCODE_DEBUGPY_ADAPTER_ENDPOINTS -u ELECTRON_RUN_AS_NODE OPENCLAW_CONFIG_PATH="$CONFIG_PATH" OPENCLAW_STATE_DIR="$STATE_DIR" HOME="$HOME_DIR" "$NODE_BIN" "$OPENCLAW_ENTRY" gateway call plugin.approval.resolve --params '{"id":"plugin:<uuid>","decision":"allow-once"}'
 EOF
 
-if [[ -n "$MESSAGE" ]]; then
-  if [[ -n "$DEMO_CASE" ]]; then
+  if [[ -n "$MESSAGE" ]]; then
+    if [[ -n "$DEMO_CASE" ]]; then
+      echo
+      echo "Auto-running demo case: $DEMO_CASE"
+    fi
+    set +e
+    openclaw agent --session-id "$SESSION_ID" --message "$MESSAGE" --thinking off --json >"$AGENT_OUTPUT_JSON" 2>"$AGENT_STDERR_LOG" &
+    AGENT_PID="$!"
+    if [[ "$DEMO_CASE" == "approval" && -n "$APPROVAL_MODE" ]]; then
+      log_step "Starting approval resolver in $APPROVAL_MODE mode"
+      env \
+        OPENCLAW_CONFIG_PATH="$CONFIG_PATH" \
+        OPENCLAW_STATE_DIR="$STATE_DIR" \
+        HOME="$HOME_DIR" \
+        DEMO_APPROVAL_TRACE_FILE="$DEMO_APPROVAL_TRACE_LOG" \
+        "$BRIDGE_PYTHON" "$THREE_TERMINAL_SCRIPT" \
+        --role approver \
+        --run-dir "$RUN_DIR" \
+        --bridge-url "$BRIDGE_URL" \
+        --session-id "$SESSION_ID" \
+        --approval-mode "$APPROVAL_MODE" \
+        --agent-pid "$AGENT_PID" \
+        --poll-interval 0.5 \
+        --idle-after-agent-exit 10 \
+        >"$APPROVER_STDOUT_LOG" 2>"$APPROVER_STDERR_LOG" &
+      APPROVER_PID="$!"
+    fi
+    wait "$AGENT_PID"
+    agent_exit_code="$?"
+    set -e
+
     echo
-    echo "Auto-running demo case: $DEMO_CASE"
-  fi
-  set +e
-  openclaw agent --session-id "$SESSION_ID" --message "$MESSAGE" --thinking off --json | tee "$AGENT_OUTPUT_JSON"
-  agent_exit_code="$?"
-  set -e
+    echo "Agent command finished with exit code: $agent_exit_code"
+    echo "Agent output JSON: $AGENT_OUTPUT_JSON"
+    if [[ -n "$APPROVER_PID" ]]; then
+      wait "$APPROVER_PID" || true
+    fi
 
-  echo
-  echo "Agent command finished with exit code: $agent_exit_code"
-  echo "Agent output JSON: $AGENT_OUTPUT_JSON"
-
-  if [[ "$agent_exit_code" -ne 0 ]]; then
-    echo "The gateway stayed up so you can inspect logs and bridge state." >&2
+    if [[ "$agent_exit_code" -ne 0 ]]; then
+      echo "The gateway stayed up so you can inspect logs and bridge state." >&2
   fi
 fi
 
