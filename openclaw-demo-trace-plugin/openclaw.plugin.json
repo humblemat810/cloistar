@@ -1,0 +1,9 @@
+{
+  "id": "demo-trace",
+  "name": "Demo Trace",
+  "description": "Writes a concise demo trace for prompt, LLM, tool, and session events.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

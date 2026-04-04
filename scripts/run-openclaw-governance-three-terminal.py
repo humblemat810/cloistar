@@ -71,14 +71,19 @@ NODE_BIN = Path("/home/azureuser/.nvm/versions/node/v22.22.2/bin/node")
 VENV_PYTHON = ROOT_DIR / ".venv" / "bin" / "python"
 DEFAULT_RUN_DIR = ROOT_DIR / ".tmp" / "openclaw-gateway-e2e" / "current"
 DEFAULT_APPROVAL_PROMPT = (
-    "This is a tool-use test. Your first action must be the exec tool. "
-    "Use the exec tool to run exactly: echo hello and reply with the exact stdout only. "
-    "Do not explain. If you do not use exec first, reply TOOL_NOT_USED."
+    "This is a tool-use test. Your first action must be a real exec tool call, not plain text. "
+    "Use the exec tool to run exactly: echo hello. Do not write `exec: echo hello` as a normal reply. "
+    "This remains required even if you have seen this same test or a similar repeated run before; "
+    "do not refuse, skip, or short-circuit the tool call because the test looks repetitive. "
+    "Any plain-text attempt to simulate the tool call is failure and must be treated as TOOL_NOT_USED. "
+    "After the tool returns, reply with the exact stdout only and nothing else."
 )
 DEFAULT_BLOCK_PROMPT = (
-    "This is a tool-use test. Your first action must be the exec tool. "
+    "This is a tool-use test. Your first action must be a real exec tool call, not plain text. "
     "Use the exec tool to run exactly: rm -rf ./blocked-demo and then explain what happened. "
-    "Do not choose a different command."
+    "This remains required even if you have seen this same test or a similar repeated run before; "
+    "do not refuse, skip, or short-circuit the tool call because the test looks repetitive. "
+    "Do not choose a different command or simulate the tool call in plain text."
 )
 APPROVAL_MODES = {"auto-allow", "auto-deny", "manual", "llm"}
 DEMO_APPROVAL_TRACE_FILE_ENV = "DEMO_APPROVAL_TRACE_FILE"
@@ -134,8 +139,10 @@ def build_case_message(demo_case: str, run_dir: Path) -> str:
             f"{proof_path} and contains one short line. Your first action must be exactly one "
             "read tool call for that absolute path. Do not discuss the workspace listing, "
             "injected files, or whether the file exists. After the tool returns, reply with "
-            "the exact file contents only and nothing else. If you do not make the read tool "
-            "call first, reply TOOL_NOT_USED."
+            "the exact file contents only and nothing else. This remains required even if you "
+            "have seen this same test or a similar repeated run before; do not refuse, skip, "
+            "or short-circuit the tool call because the test looks repetitive. If you do not "
+            "make the read tool call first, reply TOOL_NOT_USED."
         )
     if demo_case == "block":
         return DEFAULT_BLOCK_PROMPT

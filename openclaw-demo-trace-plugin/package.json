@@ -1,0 +1,10 @@
+{
+  "name": "@openclaw/demo-trace",
+  "version": "2026.4.4",
+  "private": true,
+  "description": "Concise demo trace hooks for OpenClaw governance demos",
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  }
+}

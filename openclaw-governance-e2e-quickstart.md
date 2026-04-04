@@ -77,7 +77,7 @@ This is the fastest way to see the stack do real work. The helper will:
 - print the agent output in your terminal
 - keep the bridge and gateway alive so you can inspect logs and bridge state
 
-If you also want a dedicated approval-only NDJSON trace for demos, start the helper with `--demo-probe`:
+If you also want a dedicated low-noise NDJSON trace for demos, start the helper with `--demo-probe`:
 
 ```bash
 bash scripts/run-openclaw-gateway-governance-e2e.sh \
@@ -94,7 +94,11 @@ That writes a demo-focused trace file at:
 /home/azureuser/cloistar/.tmp/openclaw-gateway-e2e/current/logs/demo-approval-trace.jsonl
 ```
 
-The demo probe is bridge-only and opt-in. It does not change normal bridge behavior when `--demo-probe` is omitted.
+The demo probe is opt-in. It does not change normal bridge behavior when `--demo-probe` is omitted. The shared trace file includes:
+
+- bridge approval lifecycle events from Python `sys.monitoring`
+- OpenClaw hook events for prompt construction, model input/output, tool calls, and session/agent boundaries
+- visible model output and tool results, but not hidden chain-of-thought
 
 ### Recommended For Pairing And Approval Work
 
