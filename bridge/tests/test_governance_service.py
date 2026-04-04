@@ -44,7 +44,7 @@ class GovernanceServiceTests(unittest.TestCase):
             os.environ["KOGWISTAR_RUNTIME_DATA_DIR"] = self._previous_runtime_dir
         self._temp_dir.cleanup()
 
-    def test_materialize_debug_snapshot_from_durable_rows(self) -> None:
+    def test_materialize_debug_snapshot_from_durable_records(self) -> None:
         observed_event = load_fixture("canonical", "before_tool_call.require_approval.observed.json")
         event_ts = "2026-04-02T00:00:00Z"
         governance_call_id = "gov-call-1"
@@ -63,7 +63,7 @@ class GovernanceServiceTests(unittest.TestCase):
             "parseStatus": "accepted",
             "notes": [],
         }
-        approval_row = {
+        approval_record = {
             "approvalRequestId": "approval-1",
             "governanceCallId": governance_call_id,
             "decisionId": "decision-1",
@@ -78,32 +78,32 @@ class GovernanceServiceTests(unittest.TestCase):
             "workflowRunId": "govrun:1",
             "suspendedTokenId": "govrun:1",
         }
-        gateway_row = {
+        gateway_record = {
             "gatewayApprovalId": "plugin:approval-1",
             "kind": "plugin",
             "status": "pending",
             "request": {"toolCallId": "tool-1", "toolName": "exec"},
             "bridgeApprovalId": "approval-1",
         }
-        workflow_row = {
+        workflow_record = {
             "workflowId": "kogwistar.governance.openclaw.v1",
             "runId": "govrun:1",
             "status": "suspended",
             "decision": "require_approval",
         }
-        projection_row = {
+        projection_record = {
             "proposalNodeId": "gov|govrun:1|proposal",
             "decisionNodeId": "gov|govrun:1|decision",
             "approvalNodeId": "gov|govrun:1|approval",
         }
 
-        self.service.persist_event_row(observed_event)
-        self.service.persist_receipt_row(receipt)
-        self.service.upsert_approval_row("approval-1", approval_row)
-        self.service.upsert_gateway_approval_row("plugin:approval-1", gateway_row)
-        self.service.upsert_workflow_run_row(governance_call_id, workflow_row)
-        self.service.upsert_projection_row(governance_call_id, projection_row)
-        self.service.upsert_approval_subscription_row(
+        self.service.persist_event_record(observed_event)
+        self.service.persist_receipt_record(receipt)
+        self.service.upsert_approval_record("approval-1", approval_record)
+        self.service.upsert_gateway_approval_record("plugin:approval-1", gateway_record)
+        self.service.upsert_workflow_run_record(governance_call_id, workflow_record)
+        self.service.upsert_projection_record(governance_call_id, projection_record)
+        self.service.upsert_approval_subscription_record(
             {
                 "enabled": True,
                 "started": True,
@@ -130,6 +130,48 @@ class GovernanceServiceTests(unittest.TestCase):
         self.assertEqual(snapshot["approvalSubscription"]["connected"], True)
         self.assertEqual(self.service.count_matching_approvals("exec"), 1)
 
+    def test_materialize_debug_snapshot_from_graph_native_record_nodes(self) -> None:
+        observed_event = load_fixture("canonical", "before_tool_call.require_approval.observed.json")
+        event_ts = "2026-04-03T00:00:00Z"
+        governance_call_id = "gov-call-graph-1"
+        observed_event["eventId"] = "event-observed-graph-1"
+        observed_event["occurredAt"] = event_ts
+        observed_event["recordedAt"] = event_ts
+        observed_event["subject"] = {"governanceCallId": governance_call_id, "approvalRequestId": None}
+        receipt = {
+            "receiptId": "receipt-graph-1",
+            "receivedAt": event_ts,
+            "sourceSystem": "openclaw",
+            "sourceEventType": "before_tool_call",
+            "adapterVersion": "v1",
+            "payloadSha256": "abc",
+            "payload": {"sessionId": "approval-demo", "rawEvent": {"toolCallId": "tool-graph-1"}},
+            "parseStatus": "accepted",
+            "notes": [],
+        }
+        approval_record = {
+            "approvalRequestId": "approval-graph-1",
+            "governanceCallId": governance_call_id,
+            "decisionId": "decision-graph-1",
+            "requestedEventId": "event-approval-graph-1",
+            "suspensionId": "suspend-graph-1",
+            "status": "pending",
+            "requestedAt": event_ts,
+            "projection": {"title": "Approval required for exec"},
+            "toolCallId": "tool-graph-1",
+            "sessionId": observed_event["correlationId"],
+            "toolName": "exec",
+        }
+
+        self.service.persist_event_record(observed_event)
+        self.service.persist_receipt_record(receipt)
+        self.service.upsert_approval_record("approval-graph-1", approval_record)
+
+        snapshot = self.service.materialize_debug_snapshot()
+        self.assertEqual(snapshot["events"][0]["eventId"], "event-observed-graph-1")
+        self.assertEqual(snapshot["receipts"][0]["receiptId"], "receipt-graph-1")
+        self.assertEqual(snapshot["approvals"]["approval-graph-1"]["toolName"], "exec")
+
     def test_backbone_steps_get_scoped_sequence_metadata(self) -> None:
         observed_event = load_fixture("canonical", "before_tool_call.require_approval.observed.json")
         event_ts = "2026-04-03T00:00:00Z"
@@ -139,7 +181,7 @@ class GovernanceServiceTests(unittest.TestCase):
         observed_event["recordedAt"] = event_ts
         observed_event["subject"] = {"governanceCallId": governance_call_id, "approvalRequestId": None}
 
-        self.service.persist_event_row(observed_event)
+        self.service.persist_event_record(observed_event)
 
         waiting_input = self._node_metadata(f"govbackbone|{governance_call_id}|waiting_input")
         input_received = self._node_metadata(f"govbackbone|{governance_call_id}|input_received")

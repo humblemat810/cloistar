@@ -3,8 +3,8 @@ from __future__ import annotations
 """Durable governance persistence facade.
 
 This module mirrors the role that ``ConversationService`` plays for the chat
-domain: one service-level boundary over graph writes, durable row materializing,
-and operator/debug queries.
+domain: one service-level boundary over append-only graph writes and a
+rebuildable latest-state projection for operator/debug queries.
 
 The service intentionally reuses core Kogwistar substrate models instead of
 introducing a separate governance-only storage primitive. Governance semantics
@@ -12,9 +12,12 @@ come from metadata, deterministic ids, and backbone/link relations.
 """
 
 from dataclasses import dataclass
+import hashlib
 import json
-from pathlib import Path
+import time
 from typing import Any, Literal, Protocol, Sequence, TypeAlias, overload
+
+from kogwistar.engine_core.models import Node
 
 from ..domain.governance_models import (
     ApprovalRow,
@@ -27,7 +30,7 @@ from ..domain.governance_models import (
 from .governance_graph import governance_edge, governance_grounding, governance_node
 
 
-STORE_ROW_ENTITY = "governance_store_row"
+STORE_RECORD_ENTITY = "governance_store_record"
 BACKBONE_ENTITY = "governance_backbone_step"
 STORE_DOC_IDS = {
     "events": "gov-store:events",
@@ -40,8 +43,9 @@ STORE_DOC_IDS = {
 }
 BACKBONE_DOC_ID = "gov-store:backbone"
 STORE_RESET_DOC_IDS = list(STORE_DOC_IDS.values()) + [BACKBONE_DOC_ID]
+BRIDGE_GOVERNANCE_PROJECTION_NAMESPACE = "bridge_governance"
 _SERVICE_CACHE: dict[tuple[int, int | None], "GovernanceService"] = {}
-RowKind: TypeAlias = Literal[
+RecordKind: TypeAlias = Literal[
     "event",
     "receipt",
     "approval",
@@ -52,7 +56,7 @@ RowKind: TypeAlias = Literal[
 ]
 CanonicalGovernanceEventRow: TypeAlias = dict[str, Any]
 IntegrationReceiptRow: TypeAlias = dict[str, Any]
-DurableGovernanceRow: TypeAlias = (
+GovernanceRecord: TypeAlias = (
     CanonicalGovernanceEventRow
     | IntegrationReceiptRow
     | ApprovalRow
@@ -61,13 +65,20 @@ DurableGovernanceRow: TypeAlias = (
     | GovernanceProjectionRow
     | ApprovalSubscriptionStatusRow
 )
-StructuredRowKind: TypeAlias = Literal[
+StructuredRecordKind: TypeAlias = Literal[
     "approval",
     "gateway_approval",
     "workflow_run",
     "projection",
     "approval_subscription",
 ]
+STRUCTURED_RECORD_KINDS: tuple[StructuredRecordKind, ...] = (
+    "approval",
+    "gateway_approval",
+    "workflow_run",
+    "projection",
+    "approval_subscription",
+)
 
 
 class GraphWritePort(Protocol):
@@ -84,6 +95,7 @@ class GraphEnginePort(Protocol):
     persist_directory: str | None
     write: GraphWritePort
     rollback: GraphRollbackPort
+    meta_sqlite: Any
 
 
 @dataclass
@@ -92,7 +104,6 @@ class GovernanceService:
 
     conversation_engine: GraphEnginePort
     workflow_engine: GraphEnginePort | None = None
-    store_dir: Path | None = None
 
     @classmethod
     def from_engine(
@@ -106,43 +117,32 @@ class GovernanceService:
         service = _SERVICE_CACHE.get(cache_key)
         if service is not None:
             return service
-        persist_root = None
-        if workflow_engine is not None and getattr(workflow_engine, "persist_directory", None):
-            persist_root = Path(str(workflow_engine.persist_directory)).parent
-        elif getattr(conversation_engine, "persist_directory", None):
-            persist_root = Path(str(conversation_engine.persist_directory)).parent
-        store_dir = (persist_root or Path.cwd()) / "governance-store"
         service = cls(
             conversation_engine=conversation_engine,
             workflow_engine=workflow_engine,
-            store_dir=store_dir,
         )
         _SERVICE_CACHE[cache_key] = service
         return service
 
     def reset_store(self) -> None:
         """Delete durable governance store documents used by tests and local runs."""
-        for path in self._row_file_paths().values():
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
         for doc_id in STORE_RESET_DOC_IDS:
             try:
                 self.conversation_engine.rollback.rollback_document(doc_id)
             except Exception:
                 # Durable reset is best-effort; a missing doc is not an error.
                 continue
+        self._clear_projection_namespace()
 
-    def persist_event_row(self, event_row: CanonicalGovernanceEventRow) -> CanonicalGovernanceEventRow:
-        """Persist one canonical governance event row and attach it to the backbone."""
-        event_id = str(event_row["eventId"])
-        event_type = str(event_row["eventType"])
-        governance_call_id = str(event_row["subject"]["governanceCallId"])
-        node_id = self._persist_row(
-            row_kind="event",
-            row_id=event_id,
-            payload=event_row,
+    def persist_event_record(self, event_record: CanonicalGovernanceEventRow) -> CanonicalGovernanceEventRow:
+        """Persist one canonical governance event record and attach it to the backbone."""
+        event_id = str(event_record["eventId"])
+        event_type = str(event_record["eventType"])
+        governance_call_id = str(event_record["subject"]["governanceCallId"])
+        node_id = self._persist_record(
+            record_kind="event",
+            record_id=event_id,
+            payload=event_record,
             doc_id=STORE_DOC_IDS["events"],
             metadata={
                 "event_type": event_type,
@@ -151,18 +151,18 @@ class GovernanceService:
             label=event_type,
             summary=f"Canonical governance event {event_type}",
         )
-        self._persist_backbone_for_event(governance_call_id, event_row, event_node_id=node_id)
-        return dict(event_row)
+        self._persist_backbone_for_event(governance_call_id, event_record, event_node_id=node_id)
+        return dict(event_record)
 
-    def persist_receipt_row(
+    def persist_receipt_record(
         self,
-        receipt_row: IntegrationReceiptRow | IntegrationReceipt,
+        receipt_record: IntegrationReceiptRow | IntegrationReceipt,
     ) -> IntegrationReceiptRow:
-        """Persist one integration receipt row."""
-        receipt_data = dict(receipt_row)
-        self._persist_row(
-            row_kind="receipt",
-            row_id=str(receipt_data["receiptId"]),
+        """Persist one integration receipt record."""
+        receipt_data = dict(receipt_record)
+        self._persist_record(
+            record_kind="receipt",
+            record_id=str(receipt_data["receiptId"]),
             payload=receipt_data,
             doc_id=STORE_DOC_IDS["receipts"],
             metadata={
@@ -176,229 +176,278 @@ class GovernanceService:
         )
         return receipt_data
 
-    def upsert_approval_row(self, approval_id: str, payload: ApprovalRow) -> ApprovalRow:
-        """Persist one approval summary row with stable identity."""
-        row: ApprovalRow = payload
-        row["approvalRequestId"] = approval_id
-        self._persist_row(
-            row_kind="approval",
-            row_id=approval_id,
-            payload=row,
+    def upsert_approval_record(self, approval_id: str, payload: ApprovalRow) -> ApprovalRow:
+        """Persist one approval summary record with stable identity."""
+        record: ApprovalRow = payload
+        record["approvalRequestId"] = approval_id
+        self._persist_record(
+            record_kind="approval",
+            record_id=approval_id,
+            payload=record,
             doc_id=STORE_DOC_IDS["approvals"],
             metadata={
                 "approval_request_id": approval_id,
-                "governance_call_id": row.get("governanceCallId"),
-                "tool_call_id": row.get("toolCallId"),
-                "tool_name": row.get("toolName"),
-                "status": row.get("status"),
-                "gateway_approval_id": row.get("gatewayApprovalId"),
+                "governance_call_id": record.get("governanceCallId"),
+                "tool_call_id": record.get("toolCallId"),
+                "tool_name": record.get("toolName"),
+                "status": record.get("status"),
+                "gateway_approval_id": record.get("gatewayApprovalId"),
             },
             label=f"Approval {approval_id}",
-            summary=f"Approval row for {row.get('toolName') or 'tool'}",
+            summary=f"Approval record for {record.get('toolName') or 'tool'}",
         )
-        return row
+        self._project_latest_record("approval", approval_id, record)
+        return record
 
-    def upsert_gateway_approval_row(
+    def upsert_gateway_approval_record(
         self,
         gateway_approval_id: str,
         payload: GatewayApprovalRow,
     ) -> GatewayApprovalRow:
-        """Persist one gateway approval row with stable identity."""
-        row: GatewayApprovalRow = payload
-        row["gatewayApprovalId"] = gateway_approval_id
-        request = row.get("request")
+        """Persist one gateway approval record with stable identity."""
+        record: GatewayApprovalRow = payload
+        record["gatewayApprovalId"] = gateway_approval_id
+        request = record.get("request")
         request_data = request if isinstance(request, dict) else {}
-        self._persist_row(
-            row_kind="gateway_approval",
-            row_id=gateway_approval_id,
-            payload=row,
+        self._persist_record(
+            record_kind="gateway_approval",
+            record_id=gateway_approval_id,
+            payload=record,
             doc_id=STORE_DOC_IDS["gateway_approvals"],
             metadata={
                 "gateway_approval_id": gateway_approval_id,
                 "tool_call_id": request_data.get("toolCallId"),
-                "kind": row.get("kind"),
-                "status": row.get("status"),
-                "bridge_approval_id": row.get("bridgeApprovalId"),
+                "kind": record.get("kind"),
+                "status": record.get("status"),
+                "bridge_approval_id": record.get("bridgeApprovalId"),
             },
             label=f"Gateway approval {gateway_approval_id}",
-            summary="OpenClaw gateway approval row",
+            summary="OpenClaw gateway approval record",
         )
-        return row
+        self._project_latest_record("gateway_approval", gateway_approval_id, record)
+        return record
 
-    def upsert_workflow_run_row(
+    def upsert_workflow_run_record(
         self,
         governance_call_id: str,
         payload: WorkflowRunRow,
     ) -> WorkflowRunRow:
-        """Persist a workflow-run summary row keyed by governance call id."""
-        row: WorkflowRunRow = payload
-        row["governanceCallId"] = governance_call_id
-        self._persist_row(
-            row_kind="workflow_run",
-            row_id=governance_call_id,
-            payload=row,
+        """Persist a workflow-run summary record keyed by governance call id."""
+        record: WorkflowRunRow = payload
+        record["governanceCallId"] = governance_call_id
+        self._persist_record(
+            record_kind="workflow_run",
+            record_id=governance_call_id,
+            payload=record,
             doc_id=STORE_DOC_IDS["workflow_runs"],
             metadata={
                 "governance_call_id": governance_call_id,
-                "workflow_id": row.get("workflowId"),
-                "run_id": row.get("runId"),
-                "status": row.get("status"),
-                "decision": row.get("decision"),
-                "final_disposition": row.get("finalDisposition"),
+                "workflow_id": record.get("workflowId"),
+                "run_id": record.get("runId"),
+                "status": record.get("status"),
+                "decision": record.get("decision"),
+                "final_disposition": record.get("finalDisposition"),
             },
             label=f"Workflow run {governance_call_id}",
             summary=f"Workflow summary for governance call {governance_call_id}",
         )
-        return row
+        self._project_latest_record("workflow_run", governance_call_id, record)
+        return record
 
-    def upsert_projection_row(
+    def upsert_projection_record(
         self,
         governance_call_id: str,
         payload: GovernanceProjectionRow,
     ) -> GovernanceProjectionRow:
-        """Persist a governance projection row keyed by governance call id."""
-        row: GovernanceProjectionRow = payload
-        row["governanceCallId"] = governance_call_id
-        self._persist_row(
-            row_kind="projection",
-            row_id=governance_call_id,
-            payload=row,
+        """Persist a governance projection record keyed by governance call id."""
+        record: GovernanceProjectionRow = payload
+        record["governanceCallId"] = governance_call_id
+        self._persist_record(
+            record_kind="projection",
+            record_id=governance_call_id,
+            payload=record,
             doc_id=STORE_DOC_IDS["governance_projection"],
             metadata={
                 "governance_call_id": governance_call_id,
-                "proposal_node_id": row.get("proposalNodeId"),
-                "decision_node_id": row.get("decisionNodeId"),
-                "approval_node_id": row.get("approvalNodeId"),
-                "resolution_node_id": row.get("resolutionNodeId"),
-                "completion_node_id": row.get("completionNodeId"),
+                "proposal_node_id": record.get("proposalNodeId"),
+                "decision_node_id": record.get("decisionNodeId"),
+                "approval_node_id": record.get("approvalNodeId"),
+                "resolution_node_id": record.get("resolutionNodeId"),
+                "completion_node_id": record.get("completionNodeId"),
             },
             label=f"Projection {governance_call_id}",
             summary=f"Projection for governance call {governance_call_id}",
         )
-        return row
+        self._project_latest_record("projection", governance_call_id, record)
+        return record
 
-    def upsert_approval_subscription_row(
+    def upsert_approval_subscription_record(
         self,
         payload: ApprovalSubscriptionStatusRow,
     ) -> ApprovalSubscriptionStatusRow:
-        """Persist the latest approval-listener subscription status."""
-        row: ApprovalSubscriptionStatusRow = payload
-        self._persist_row(
-            row_kind="approval_subscription",
-            row_id="latest",
-            payload=row,
+        """Persist the latest approval-listener subscription record."""
+        record: ApprovalSubscriptionStatusRow = payload
+        self._persist_record(
+            record_kind="approval_subscription",
+            record_id="latest",
+            payload=record,
             doc_id=STORE_DOC_IDS["approval_subscription"],
             metadata={
-                "enabled": row.get("enabled"),
-                "started": row.get("started"),
-                "connected": row.get("connected"),
-                "last_error": row.get("lastError"),
+                "enabled": record.get("enabled"),
+                "started": record.get("started"),
+                "connected": record.get("connected"),
+                "last_error": record.get("lastError"),
             },
             label="Approval subscription status",
             summary="Latest gateway approval listener status",
         )
-        return row
+        self._project_latest_record("approval_subscription", "latest", record)
+        return record
 
     @overload
-    def get_row(self, row_kind: Literal["event"], row_id: str) -> CanonicalGovernanceEventRow | None: ...
+    def get_record(self, record_kind: Literal["event"], record_id: str) -> CanonicalGovernanceEventRow | None: ...
 
     @overload
-    def get_row(self, row_kind: Literal["receipt"], row_id: str) -> IntegrationReceiptRow | None: ...
+    def get_record(self, record_kind: Literal["receipt"], record_id: str) -> IntegrationReceiptRow | None: ...
 
     @overload
-    def get_row(self, row_kind: Literal["approval"], row_id: str) -> ApprovalRow | None: ...
+    def get_record(self, record_kind: Literal["approval"], record_id: str) -> ApprovalRow | None: ...
 
     @overload
-    def get_row(self, row_kind: Literal["gateway_approval"], row_id: str) -> GatewayApprovalRow | None: ...
+    def get_record(self, record_kind: Literal["gateway_approval"], record_id: str) -> GatewayApprovalRow | None: ...
 
     @overload
-    def get_row(self, row_kind: Literal["workflow_run"], row_id: str) -> WorkflowRunRow | None: ...
+    def get_record(self, record_kind: Literal["workflow_run"], record_id: str) -> WorkflowRunRow | None: ...
 
     @overload
-    def get_row(self, row_kind: Literal["projection"], row_id: str) -> GovernanceProjectionRow | None: ...
+    def get_record(self, record_kind: Literal["projection"], record_id: str) -> GovernanceProjectionRow | None: ...
 
     @overload
-    def get_row(
+    def get_record(
         self,
-        row_kind: Literal["approval_subscription"],
-        row_id: str,
+        record_kind: Literal["approval_subscription"],
+        record_id: str,
     ) -> ApprovalSubscriptionStatusRow | None: ...
 
-    def get_row(self, row_kind: RowKind, row_id: str) -> DurableGovernanceRow | None:
-        """Return one persisted row payload by kind and stable row id."""
-        rows = self._load_rows(row_kind)
-        if isinstance(rows, dict):
-            row = rows.get(row_id)
-            return dict(row) if isinstance(row, dict) else None
-        for row in rows:
-            if isinstance(row, dict) and str(row.get(self._row_id_key(row_kind), "")) == row_id:
-                return dict(row)
+    def get_record(self, record_kind: RecordKind, record_id: str) -> GovernanceRecord | None:
+        """Return one persisted record payload by kind and stable record id."""
+        records = self._load_records(record_kind)
+        if isinstance(records, dict):
+            record = records.get(record_id)
+            return dict(record) if isinstance(record, dict) else None
+        for record in records:
+            if isinstance(record, dict) and str(record.get(self._record_id_key(record_kind), "")) == record_id:
+                return dict(record)
         return None
 
     @overload
-    def list_rows(self, row_kind: Literal["event"]) -> list[CanonicalGovernanceEventRow]: ...
+    def list_records(self, record_kind: Literal["event"]) -> list[CanonicalGovernanceEventRow]: ...
 
     @overload
-    def list_rows(self, row_kind: Literal["receipt"]) -> list[IntegrationReceiptRow]: ...
+    def list_records(self, record_kind: Literal["receipt"]) -> list[IntegrationReceiptRow]: ...
 
     @overload
-    def list_rows(self, row_kind: Literal["approval"]) -> list[ApprovalRow]: ...
+    def list_records(self, record_kind: Literal["approval"]) -> list[ApprovalRow]: ...
 
     @overload
-    def list_rows(self, row_kind: Literal["gateway_approval"]) -> list[GatewayApprovalRow]: ...
+    def list_records(self, record_kind: Literal["gateway_approval"]) -> list[GatewayApprovalRow]: ...
 
     @overload
-    def list_rows(self, row_kind: Literal["workflow_run"]) -> list[WorkflowRunRow]: ...
+    def list_records(self, record_kind: Literal["workflow_run"]) -> list[WorkflowRunRow]: ...
 
     @overload
-    def list_rows(self, row_kind: Literal["projection"]) -> list[GovernanceProjectionRow]: ...
+    def list_records(self, record_kind: Literal["projection"]) -> list[GovernanceProjectionRow]: ...
 
     @overload
-    def list_rows(self, row_kind: Literal["approval_subscription"]) -> list[ApprovalSubscriptionStatusRow]: ...
+    def list_records(self, record_kind: Literal["approval_subscription"]) -> list[ApprovalSubscriptionStatusRow]: ...
 
-    def list_rows(self, row_kind: RowKind) -> Sequence[DurableGovernanceRow]:
-        """Return all persisted rows for one logical row kind."""
-        rows = self._load_rows(row_kind)
-        if row_kind == "approval_subscription":
-            return [dict(rows)] if isinstance(rows, dict) and rows else []
-        if isinstance(rows, dict):
-            return [dict(row) for row in rows.values() if isinstance(row, dict)]
-        return [dict(row) for row in rows if isinstance(row, dict)]
+    def list_records(self, record_kind: RecordKind) -> Sequence[GovernanceRecord]:
+        """Return all persisted records for one logical record kind."""
+        records = self._load_records(record_kind)
+        if isinstance(records, dict):
+            return [dict(record) for record in records.values() if isinstance(record, dict)]
+        return [dict(record) for record in records if isinstance(record, dict)]
 
     def count_matching_approvals(self, tool_name: str) -> int:
-        """Count approvals for one tool from durable persisted rows."""
-        return sum(1 for row in self.list_rows("approval") if row.get("toolName") == tool_name)
+        """Count approvals for one tool from durable persisted records."""
+        return sum(1 for record in self.list_records("approval") if record.get("toolName") == tool_name)
 
     def materialize_debug_snapshot(self) -> dict[str, Any]:
-        """Build the bridge debug-state shape from durable row nodes."""
-        events = self._sorted_rows(self.list_rows("event"), keys=("recordedAt", "occurredAt", "eventId"))
-        receipts = self._sorted_rows(self.list_rows("receipt"), keys=("receivedAt", "receiptId"))
-        approvals: dict[str, ApprovalRow] = {}
-        for row in self.list_rows("approval"):
-            approval_request_id = row.get("approvalRequestId")
-            if isinstance(approval_request_id, str):
-                approvals[approval_request_id] = row
-
-        gateway_approvals: dict[str, GatewayApprovalRow] = {}
-        for row in self.list_rows("gateway_approval"):
-            gateway_approval_id = row.get("gatewayApprovalId")
-            if isinstance(gateway_approval_id, str):
-                gateway_approvals[gateway_approval_id] = row
-
+        """Build the bridge debug-state shape from durable record nodes."""
+        events = self._sorted_records(self.list_records("event"), keys=("recordedAt", "occurredAt", "eventId"))
+        receipts = self._sorted_records(self.list_records("receipt"), keys=("receivedAt", "receiptId"))
         workflow_runs: dict[str, WorkflowRunRow] = {}
-        for row in self.list_rows("workflow_run"):
-            governance_call_id = row.get("governanceCallId")
+        for record in self.list_records("workflow_run"):
+            governance_call_id = record.get("governanceCallId")
             if isinstance(governance_call_id, str):
-                workflow_runs[governance_call_id] = row
+                workflow_runs[governance_call_id] = record
 
         governance_projection: dict[str, GovernanceProjectionRow] = {}
-        for row in self.list_rows("projection"):
-            governance_call_id = row.get("governanceCallId")
+        for record in self.list_records("projection"):
+            governance_call_id = record.get("governanceCallId")
             if isinstance(governance_call_id, str):
-                governance_projection[governance_call_id] = row
+                governance_projection[governance_call_id] = record
 
-        subscription_rows = self.list_rows("approval_subscription")
-        approval_subscription = subscription_rows[-1] if subscription_rows else {
+        approvals: dict[str, ApprovalRow] = {}
+        for record in self.list_records("approval"):
+            approval_request_id = record.get("approvalRequestId")
+            if not isinstance(approval_request_id, str):
+                continue
+            approval_record = dict(record)
+            governance_call_id = approval_record.get("governanceCallId")
+            workflow_run = workflow_runs.get(governance_call_id) if isinstance(governance_call_id, str) else None
+            projection = governance_projection.get(governance_call_id) if isinstance(governance_call_id, str) else None
+            if workflow_run is not None:
+                approval_record.setdefault("workflowRunId", workflow_run.get("runId"))
+                approval_record.setdefault("workflowId", workflow_run.get("workflowId"))
+                approval_record.setdefault("runtimeConversationId", workflow_run.get("conversationId"))
+                approval_record.setdefault("runtimeTurnNodeId", workflow_run.get("turnNodeId"))
+                approval_record.setdefault("suspendedNodeId", workflow_run.get("suspendedNodeId"))
+                approval_record.setdefault("suspendedTokenId", workflow_run.get("suspendedTokenId"))
+            if projection is not None:
+                approval_record.setdefault("runtimeProjection", projection)
+            approvals[approval_request_id] = approval_record
+
+        gateway_approvals: dict[str, GatewayApprovalRow] = {}
+        for record in self.list_records("gateway_approval"):
+            gateway_approval_id = record.get("gatewayApprovalId")
+            if isinstance(gateway_approval_id, str):
+                gateway_record = dict(record)
+                status = gateway_record.get("status")
+                if "decision" not in gateway_record and isinstance(status, str) and status not in {"pending", "resolved"}:
+                    gateway_record["decision"] = status
+                gateway_approvals[gateway_approval_id] = gateway_record
+
+        # Bridge approval records and gateway approval records are persisted as
+        # separate stable-id records. Reattach their cross-link here so the
+        # debug snapshot stays consistent even if one side was written first.
+        for gateway_approval_id, gateway_record in gateway_approvals.items():
+            bridge_approval_id = gateway_record.get("bridgeApprovalId")
+            if isinstance(bridge_approval_id, str):
+                approval_record = approvals.get(bridge_approval_id)
+                if approval_record is not None:
+                    approval_record.setdefault("gatewayApprovalId", gateway_approval_id)
+                    continue
+            request = gateway_record.get("request")
+            tool_call_id = request.get("toolCallId") if isinstance(request, dict) else None
+            if not isinstance(tool_call_id, str):
+                continue
+            for approval_record in approvals.values():
+                if approval_record.get("toolCallId") == tool_call_id:
+                    approval_record.setdefault("gatewayApprovalId", gateway_approval_id)
+                    gateway_record.setdefault("bridgeApprovalId", approval_record.get("approvalRequestId"))
+                    break
+
+        for approval_request_id, approval_record in approvals.items():
+            gateway_approval_id = approval_record.get("gatewayApprovalId")
+            if not isinstance(gateway_approval_id, str):
+                continue
+            gateway_record = gateway_approvals.get(gateway_approval_id)
+            if gateway_record is not None:
+                gateway_record.setdefault("bridgeApprovalId", approval_request_id)
+
+        subscription_records = self.list_records("approval_subscription")
+        approval_subscription = subscription_records[-1] if subscription_records else {
             "enabled": False,
             "started": False,
             "connected": False,
@@ -407,6 +456,53 @@ class GovernanceService:
             "lastResolvedEventAt": None,
             "lastStatusAt": None,
         }
+        if not isinstance(approval_subscription, dict):
+            approval_subscription = {
+                "enabled": False,
+                "started": False,
+                "connected": False,
+                "lastError": None,
+                "lastRequestedEventAt": None,
+                "lastResolvedEventAt": None,
+                "lastStatusAt": None,
+            }
+        for key, default in (
+            ("enabled", False),
+            ("started", False),
+            ("connected", False),
+            ("lastError", None),
+            ("lastRequestedEventAt", None),
+            ("lastResolvedEventAt", None),
+            ("lastStatusAt", None),
+        ):
+            approval_subscription.setdefault(key, default)
+        if approval_subscription.get("lastRequestedEventAt") is None:
+            requested_values = [
+                gateway_record.get("createdAtMs")
+                for gateway_record in gateway_approvals.values()
+                if isinstance(gateway_record.get("createdAtMs"), int)
+            ]
+            if requested_values:
+                approval_subscription["lastRequestedEventAt"] = max(requested_values)
+        if approval_subscription.get("lastResolvedEventAt") is None:
+            resolved_values = [
+                gateway_record.get("ts")
+                for gateway_record in gateway_approvals.values()
+                if isinstance(gateway_record.get("ts"), int)
+            ]
+            if resolved_values:
+                approval_subscription["lastResolvedEventAt"] = max(resolved_values)
+        if approval_subscription.get("lastStatusAt") is None:
+            status_values = [
+                value
+                for value in (
+                    approval_subscription.get("lastResolvedEventAt"),
+                    approval_subscription.get("lastRequestedEventAt"),
+                )
+                if isinstance(value, int)
+            ]
+            if status_values:
+                approval_subscription["lastStatusAt"] = max(status_values)
         return {
             "events": events,
             "approvals": approvals,
@@ -417,48 +513,99 @@ class GovernanceService:
             "receipts": receipts,
         }
 
-    def _persist_row(
+    def _persist_record(
         self,
         *,
-        row_kind: RowKind,
-        row_id: str,
-        payload: DurableGovernanceRow,
+        record_kind: RecordKind,
+        record_id: str,
+        payload: GovernanceRecord,
         doc_id: str,
         metadata: dict[str, Any],
         label: str,
         summary: str,
     ) -> str:
-        """Persist one stable-id row node in the governance store namespace."""
-        node_id = self._row_node_id(row_kind, row_id)
+        """Persist one stable-id record node in the governance store namespace."""
+        node_id = self._record_node_id(record_kind, record_id, payload)
         node = governance_node(
             node_id=node_id,
             label=label,
             summary=summary,
             doc_id=doc_id,
             metadata={
-                "entity_type": STORE_ROW_ENTITY,
-                "row_kind": row_kind,
-                "row_id": row_id,
+                "entity_type": STORE_RECORD_ENTITY,
+                "record_kind": record_kind,
+                "record_id": record_id,
                 **{k: v for k, v in metadata.items() if v is not None},
             },
-            # Store the full row as JSON because substrate node properties only
+            # Store the full record as JSON because substrate node properties only
             # support primitive-friendly values; metadata remains the index layer.
             properties={
                 "payloadJson": json.dumps(payload, sort_keys=True, separators=(",", ":")),
             },
         )
         self.conversation_engine.write.add_node(node)
-        self._write_row(row_kind=row_kind, row_id=row_id, payload=payload)
         return node_id
 
+    def _clear_projection_namespace(self) -> None:
+        """Clear the bridge governance named-projection namespace."""
+        meta = getattr(self.conversation_engine, "meta_sqlite", None)
+        clearer = getattr(meta, "clear_projection_namespace", None)
+        if callable(clearer):
+            clearer(BRIDGE_GOVERNANCE_PROJECTION_NAMESPACE)
+
+    def _project_latest_record(
+        self,
+        record_kind: StructuredRecordKind,
+        record_id: str,
+        payload: GovernanceRecord,
+    ) -> None:
+        """Update the latest-state projection from an append-only record fact."""
+        meta = getattr(self.conversation_engine, "meta_sqlite", None)
+        replacer = getattr(meta, "replace_named_projection", None)
+        if not callable(replacer):
+            return
+        replacer(
+            BRIDGE_GOVERNANCE_PROJECTION_NAMESPACE,
+            self._projection_key(record_kind, record_id),
+            dict(payload),
+            last_authoritative_seq=self._projection_seq_for_record(payload),
+            last_materialized_seq=self._projection_seq_for_record(payload),
+            projection_schema_version=1,
+            materialization_status="ready",
+        )
+
+    def _projection_seq_for_record(self, payload: GovernanceRecord) -> int:
+        """Best-effort seq watermark for bridge governance projection rows."""
+        if not isinstance(payload, dict):
+            return 0
+        governance_call_id = payload.get("governanceCallId")
+        if not isinstance(governance_call_id, str) or not governance_call_id:
+            return 0
+        meta = getattr(self.conversation_engine, "meta_sqlite", None)
+        current_scoped_seq = getattr(meta, "current_scoped_seq", None)
+        if not callable(current_scoped_seq):
+            return 0
+        try:
+            return int(current_scoped_seq(f"governance:{governance_call_id}") or 0)
+        except Exception:
+            return 0
+
     @staticmethod
-    def _sorted_rows(
-        rows: Sequence[CanonicalGovernanceEventRow] | Sequence[IntegrationReceiptRow],
+    def _projection_key(record_kind: StructuredRecordKind, record_id: str) -> str:
+        return f"{record_kind}:{record_id}"
+
+    @staticmethod
+    def _projection_key_prefix(record_kind: StructuredRecordKind) -> str:
+        return f"{record_kind}:"
+
+    @staticmethod
+    def _sorted_records(
+        records: Sequence[CanonicalGovernanceEventRow] | Sequence[IntegrationReceiptRow],
         *,
         keys: tuple[str, ...],
     ) -> list[dict[str, Any]]:
-        def sort_key(row: dict[str, Any]) -> tuple:
-            if "eventType" in row:
+        def sort_key(record: dict[str, Any]) -> tuple:
+            if "eventType" in record:
                 event_rank = {
                     "governance.tool_call_observed.v1": "01",
                     "governance.decision_recorded.v1": "02",
@@ -468,32 +615,29 @@ class GovernanceService:
                     "governance.execution_resumed.v1": "06",
                     "governance.execution_denied.v1": "07",
                     "governance.tool_call_completed.v1": "08",
-                }.get(str(row.get("eventType") or ""), "99")
+                }.get(str(record.get("eventType") or ""), "99")
             else:
                 event_rank = "00"
-            return (event_rank,) + tuple(str(row.get(key) or "") for key in keys)
+            return (event_rank,) + tuple(str(record.get(key) or "") for key in keys)
 
-        return sorted(rows, key=sort_key)
+        return sorted(records, key=sort_key)
 
     @staticmethod
-    def _row_node_id(row_kind: RowKind, row_id: str) -> str:
-        return f"govstore|{row_kind}|{row_id}"
+    def _record_node_id(record_kind: RecordKind, record_id: str, payload: GovernanceRecord) -> str:
+        """Return an append-only record node id for projection-like records.
 
-    def _row_file_paths(self) -> dict[RowKind, Path]:
-        """Return file locations for the durable JSON row collections."""
-        store_dir = self.store_dir or (Path.cwd() / "governance-store")
-        store_dir.mkdir(parents=True, exist_ok=True)
-        return {
-            "event": store_dir / "events.json",
-            "receipt": store_dir / "receipts.json",
-            "approval": store_dir / "approvals.json",
-            "gateway_approval": store_dir / "gateway_approvals.json",
-            "workflow_run": store_dir / "workflow_runs.json",
-            "projection": store_dir / "projections.json",
-            "approval_subscription": store_dir / "approval_subscription.json",
-        }
+        Canonical events and receipts already have unique fact ids, so their
+        stable ids are safe. Projection-like records get a content hash suffix
+        so new states append rather than pretending to overwrite graph truth.
+        """
+        if record_kind in {"event", "receipt"}:
+            return f"govstore|{record_kind}|{record_id}"
+        digest = hashlib.sha1(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:12]
+        return f"govstore|{record_kind}|{record_id}|{digest}"
 
-    def _row_id_key(self, row_kind: RowKind) -> str:
+    def _record_id_key(self, record_kind: RecordKind) -> str:
         return {
             "event": "eventId",
             "receipt": "receiptId",
@@ -502,69 +646,188 @@ class GovernanceService:
             "workflow_run": "governanceCallId",
             "projection": "governanceCallId",
             "approval_subscription": "kind",
-        }.get(row_kind, "id")
+        }.get(record_kind, "id")
 
     @overload
-    def _load_rows(self, row_kind: Literal["event"]) -> list[CanonicalGovernanceEventRow]: ...
+    def _load_records(self, record_kind: Literal["event"]) -> list[CanonicalGovernanceEventRow]: ...
 
     @overload
-    def _load_rows(self, row_kind: Literal["receipt"]) -> list[IntegrationReceiptRow]: ...
+    def _load_records(self, record_kind: Literal["receipt"]) -> list[IntegrationReceiptRow]: ...
 
     @overload
-    def _load_rows(self, row_kind: StructuredRowKind) -> dict[str, DurableGovernanceRow]: ...
+    def _load_records(self, record_kind: StructuredRecordKind) -> dict[str, GovernanceRecord]: ...
 
-    def _load_rows(
+    def _load_records(
         self,
-        row_kind: RowKind,
-    ) -> list[CanonicalGovernanceEventRow] | list[IntegrationReceiptRow] | dict[str, DurableGovernanceRow]:
-        """Load one durable row collection from JSON on disk."""
-        path = self._row_file_paths()[row_kind]
-        if not path.exists():
-            if row_kind in {"event", "receipt"}:
-                return []
+        record_kind: RecordKind,
+    ) -> list[CanonicalGovernanceEventRow] | list[IntegrationReceiptRow] | dict[str, GovernanceRecord]:
+        """Load one durable record collection from graph-native store nodes."""
+        if record_kind in STRUCTURED_RECORD_KINDS:
+            projected_records = self._load_projected_records(record_kind)
+            if projected_records:
+                return projected_records
+        graph_records = self._load_graph_records(record_kind)
+        if record_kind in STRUCTURED_RECORD_KINDS and isinstance(graph_records, dict) and graph_records:
+            for projected_id, projected_record in graph_records.items():
+                if isinstance(projected_record, dict):
+                    self._project_latest_record(record_kind, projected_id, projected_record)
+            projected_records = self._load_projected_records(record_kind)
+            if projected_records:
+                return projected_records
+        if graph_records is not None:
+            return graph_records
+        if record_kind in {"event", "receipt"}:
+            return []
+        return {}
+
+    def _load_projected_records(
+        self,
+        record_kind: StructuredRecordKind,
+    ) -> dict[str, GovernanceRecord]:
+        """Load the latest-state projection from the generic named-projection store."""
+        meta = getattr(self.conversation_engine, "meta_sqlite", None)
+        lister = getattr(meta, "list_named_projections", None)
+        if not callable(lister):
             return {}
-        data = json.loads(path.read_text())
-        return data if isinstance(data, (list, dict)) else ([] if row_kind in {"event", "receipt"} else {})
+        projected: dict[str, GovernanceRecord] = {}
+        for row in lister(BRIDGE_GOVERNANCE_PROJECTION_NAMESPACE) or []:
+            if not isinstance(row, dict):
+                continue
+            key = row.get("key")
+            if not isinstance(key, str) or not key.startswith(self._projection_key_prefix(record_kind)):
+                continue
+            record_id = key[len(self._projection_key_prefix(record_kind)) :]
+            if not record_id:
+                continue
+            payload = row.get("payload")
+            if isinstance(payload, dict):
+                projected[record_id] = payload
+        return projected
 
-    def _write_row(self, *, row_kind: RowKind, row_id: str, payload: DurableGovernanceRow) -> None:
-        """Write one durable row into its JSON collection."""
-        current = self._load_rows(row_kind)
-        if isinstance(current, list):
-            id_key = self._row_id_key(row_kind)
-            replaced = False
-            for index, row in enumerate(current):
-                if isinstance(row, dict) and str(row.get(id_key, "")) == row_id:
-                    current[index] = dict(payload)
-                    replaced = True
-                    break
-            if not replaced:
-                current.append(dict(payload))
-            self._row_file_paths()[row_kind].write_text(json.dumps(current, indent=2, sort_keys=True))
-            return
+    def _load_graph_records(
+        self,
+        record_kind: RecordKind,
+    ) -> list[CanonicalGovernanceEventRow] | list[IntegrationReceiptRow] | dict[str, GovernanceRecord] | None:
+        """Load durable records from graph-native store nodes when available."""
 
-        if row_kind == "approval_subscription":
-            self._row_file_paths()[row_kind].write_text(json.dumps(dict(payload), indent=2, sort_keys=True))
-            return
+        read = getattr(self.conversation_engine, "read", None)
+        if read is None or not hasattr(read, "get_nodes"):
+            return None
 
-        current[row_id] = dict(payload)
-        self._row_file_paths()[row_kind].write_text(json.dumps(current, indent=2, sort_keys=True))
+        try:
+            nodes = read.get_nodes(  # type: ignore[call-arg]
+                where={
+                    "$and": [
+                        {"entity_type": STORE_RECORD_ENTITY},
+                        {"record_kind": record_kind},
+                    ]
+                },
+                node_type=Node,
+                limit=20_000,
+            )
+        except Exception:
+            return None
+
+        decoded_records: list[dict[str, Any]] = []
+        for node in nodes or []:
+            properties = getattr(node, "properties", {}) or {}
+            payload_json = properties.get("payloadJson")
+            if not isinstance(payload_json, str):
+                continue
+            try:
+                payload = json.loads(payload_json)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                decoded_records.append(payload)
+
+        if record_kind in {"event", "receipt"}:
+            return decoded_records
+
+        if record_kind == "approval_subscription":
+            if not decoded_records:
+                return {}
+            merged_subscription: dict[str, Any] = {}
+            for record in decoded_records:
+                merged_subscription.update(record)
+            return merged_subscription
+
+        id_key = self._record_id_key(record_kind)
+        indexed: dict[str, GovernanceRecord] = {}
+        for record in decoded_records:
+            record_id = record.get(id_key)
+            if isinstance(record_id, str):
+                current = indexed.get(record_id)
+                if isinstance(current, dict):
+                    indexed[record_id] = self._merge_record_payloads(current, record)
+                else:
+                    indexed[record_id] = record
+        return indexed
+
+    def _merge_record_payloads(self, current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+        """Merge duplicate persisted records without depending on backend read order."""
+        merged = dict(current)
+        for key, incoming_value in incoming.items():
+            if key not in merged:
+                merged[key] = incoming_value
+                continue
+            current_value = merged[key]
+            merged[key] = self._merge_record_value(key, current_value, incoming_value)
+        return merged
+
+    def _merge_record_value(self, key: str, current_value: Any, incoming_value: Any) -> Any:
+        """Prefer the richer non-empty value when duplicate records disagree."""
+        if isinstance(current_value, dict) and isinstance(incoming_value, dict):
+            return self._merge_record_payloads(current_value, incoming_value)
+        if self._is_empty_record_value(current_value):
+            return incoming_value
+        if self._is_empty_record_value(incoming_value):
+            return current_value
+        if key in {"ts", "createdAtMs", "expiresAtMs", "lastRequestedEventAt", "lastResolvedEventAt", "lastStatusAt"}:
+            if isinstance(current_value, (int, float)) and isinstance(incoming_value, (int, float)):
+                return max(current_value, incoming_value)
+        if key in {"status", "decision"}:
+            current_rank = self._resolution_rank(current_value)
+            incoming_rank = self._resolution_rank(incoming_value)
+            return incoming_value if incoming_rank >= current_rank else current_value
+        return current_value
+
+    @staticmethod
+    def _is_empty_record_value(value: Any) -> bool:
+        return value is None or value == "" or value == {} or value == []
+
+    @staticmethod
+    def _resolution_rank(value: Any) -> int:
+        if not isinstance(value, str):
+            return 0
+        normalized = value.strip().lower()
+        return {
+            "pending": 0,
+            "resolved": 1,
+            "allow": 2,
+            "allow-once": 2,
+            "allow_once": 2,
+            "deny": 2,
+            "block": 2,
+            "rejected": 2,
+        }.get(normalized, 1 if normalized else 0)
 
     def _persist_backbone_for_event(
         self,
         governance_call_id: str,
-        event_row: CanonicalGovernanceEventRow,
+        event_record: CanonicalGovernanceEventRow,
         *,
         event_node_id: str,
     ) -> None:
         """Persist the operator-facing backbone chain and link the event to its anchor."""
-        event_type = str(event_row["eventType"])
+        event_type = str(event_record["eventType"])
         if event_type == "governance.tool_call_observed.v1":
             self._ensure_backbone_transition(governance_call_id, "waiting_input", "input_received")
             self._link_event_to_backbone(governance_call_id, event_node_id, "input_received", "governance_observed_at")
             return
 
         if event_type == "governance.decision_recorded.v1":
-            disposition = str(event_row.get("data", {}).get("disposition") or "")
+            disposition = str(event_record.get("data", {}).get("disposition") or "")
             step = {
                 "allow": "policy_approved",
                 "block": "policy_rejected",
