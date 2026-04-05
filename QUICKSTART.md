@@ -1,6 +1,6 @@
 # Quickstart — Kogwistar × OpenClaw
 
-This guide gets you from zero to a running Kogwistar governance bridge in three different ways:
+This guide gets you from zero to a running Kogwistar bridge stack in three different ways:
 
 1. **[Docker](#1-docker)** — fastest, zero Python setup required
 2. **[Local Python (venv)](#2-local-python-venv)** — preferred for development
@@ -21,7 +21,7 @@ This guide gets you from zero to a running Kogwistar governance bridge in three 
 
 ## 1. Docker
 
-The quickest path to a running bridge.
+The quickest path to a running local/self-hosted bridge.
 
 ### 1a. Clone and configure
 
@@ -43,7 +43,8 @@ docker compose build
 docker compose up -d
 ```
 
-> **Note**: The default `docker-compose.yml` only starts the `bridge` service on port **8799**.
+> **Note**: The default `docker-compose.yml` only starts the bridge on port **8799**.
+> That bridge exposes both governance endpoints and `/kg/*` graph endpoints.
 > For the full hardened stack (bridge + OpenClaw gateway + CLI), see [docker-compose.hardened.yml](./docker-compose.hardened.yml).
 
 ### 1c. Verify
@@ -201,15 +202,18 @@ print(resp.json())  # {"ok": true, "nodes": [...]}
 
 The repo ships two OpenClaw plugins. These require a local OpenClaw installation.
 
+- `plugin-governance/` handles tool-call governance hooks and approval callbacks
+- `plugin-kg/` exposes bridge-backed Knowledge Graph CRUD and query tools
+
 ### 4a. Build plugins
 
 ```bash
-# Governance plugin (before/after tool-call hooks)
+# Governance plugin (before/after tool-call hooks + approval resolution)
 cd plugin-governance
 npm install
 npm run build
 
-# Knowledge Graph plugin (CRUD tools)
+# Knowledge Graph plugin (CRUD + query tools)
 cd ../plugin-kg
 npm install
 npm run build

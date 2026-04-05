@@ -7,6 +7,7 @@ This repository connects [Kogwistar](./kogwistar/) (a graph-native agent substra
 - **Governance hooks** — real `allow`, `block`, and `requireApproval` decisions on every tool call
 - **Knowledge Graph CRUD** — create, query, redirect, and tombstone nodes/edges from CLI or agent tools
 - **Embeddable bridge** — a standalone FastAPI service that any OpenClaw deployment can point at
+- A **governance/event semantics layer that agent systems usually hand-wave away**
 
 ---
 
@@ -21,15 +22,19 @@ This repository connects [Kogwistar](./kogwistar/) (a graph-native agent substra
 - OpenClaw plugin hooks post real `before_tool_call`, `after_tool_call`, and approval-resolution payloads to the bridge.
 - The bridge returns real `allow`, `block`, and `requireApproval` OpenClaw decisions.
 - The bridge hosts an embedded Kogwistar `WorkflowRuntime` for governance decisioning and approval suspend/resume.
+- Canonical governance events, receipts, approvals, workflow runs, and latest-state projections are persisted durably through the bridge store/service layer.
+- The conversation graph carries semantic governance nodes and edges, including result and terminal completion semantics.
+- The bridge exposes real KG CRUD and query endpoints under `/kg/*`, and the KG plugin exposes those as OpenClaw tools and CLI commands.
 - Two decoupled plugins:
   - `plugin-governance/` — lifecycle hook plugin (governance)
   - `plugin-kg/` — Knowledge Graph CRUD plugin
 
-## What is not final yet
+## Current scope and refinement areas
 
-- Persistence is still hybrid, not yet the final graph-native read model.
-- The bridge still uses a local governance policy implementation, not a production policy engine.
-- The repo is still refining restart/rebuild/query semantics around the durable store and graph artifacts.
+- The stack is production-capable for local and self-hosted deployments, with a deliberately simple and opinionated governance policy layer rather than a fully enterprise policy engine.
+- Kogwistar is the current workflow/graph substrate. Some CDC and runtime trace details therefore follow substrate behavior, but the bridge semantics are intended to stay portable to other runtimes if the substrate changes later.
+- Packaging and operator ergonomics are already usable today, but the repo is still tightening the developer/operator experience around install, rebuild, and inspection workflows.
+- The graph/query layer is implemented and durable today, and the remaining work is mainly about making query surfaces, demos, and operator-facing inspection paths clearer and easier to use.
 
 ---
 
