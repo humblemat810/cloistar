@@ -24,6 +24,7 @@
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist",
     "dev": "tsc -w -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.js",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "devDependencies": {

@@ -63,6 +63,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bridge.app.llm_models import LlmApprovalDecisionContext
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 HELPER_PATH = ROOT_DIR / "scripts" / "run-openclaw-gateway-governance-e2e.sh"
@@ -379,14 +381,21 @@ def run_llm_approval_decision(
     command: str | None,
     summary: str | None,
 ) -> str:
+    prompt_context = LlmApprovalDecisionContext(
+        approval_kind=approval_kind,
+        approval_id=approval_id,
+        tool_name=tool_name,
+        command=command,
+        summary=summary,
+    ).model_dump(field_mode="llm")
     prompt = (
         "You are deciding a local governance approval. "
         "Reply with exactly one token: ALLOW_ONCE or DENY.\n\n"
-        f"approval_kind: {approval_kind}\n"
-        f"approval_id: {approval_id}\n"
-        f"tool_name: {tool_name}\n"
-        f"command: {command or ''}\n"
-        f"summary: {summary or ''}\n\n"
+        f"approval_kind: {prompt_context.get('approval_kind', '')}\n"
+        f"approval_id: {prompt_context.get('approval_id', '')}\n"
+        f"tool_name: {prompt_context.get('tool_name', '')}\n"
+        f"command: {prompt_context.get('command', '') or ''}\n"
+        f"summary: {prompt_context.get('summary', '') or ''}\n\n"
         "Allow harmless echo/read style actions. Deny destructive or risky actions."
     )
     result = run_openclaw_cmd(

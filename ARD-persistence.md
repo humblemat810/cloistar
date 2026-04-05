@@ -335,6 +335,63 @@ These rules are now part of the intended design:
 - operational status rows such as approval-subscription state should not be
   persisted as standalone semantic conversation nodes
 
+## LLM-Facing Serialization Boundary
+
+Durable backend truth and LLM-facing tool output are not the same thing.
+
+This is now an explicit rule for the repo:
+
+- backend/debug serialization may remain rich and graph-complete
+- LLM-facing serialization must be a sliced, sanitized view
+
+The immediate motivation is that many durable graph artifacts contain fields
+that are valid for backend truth but noisy or unsafe for model context, such as:
+
+- `payload_json`
+- `evaluation_json`
+- `result_json`
+- `state_json`
+- raw receipt payloads
+- internal runtime/projection linkage internals
+
+### Required distinction
+
+There are at least three output modes in the system:
+
+- backend/debug
+- operator/latest-state
+- LLM-facing/tool-facing
+
+Do not treat `model_dump()` from a durable backend model as automatically safe
+for LLM/tool output.
+
+### Current rule
+
+- bridge `/kg/*` endpoints may continue to expose backend-rich graph payloads
+  for debug/operator use
+- OpenClaw KG plugin tool responses must project those payloads into an
+  explicit LLM-safe shape before placing them in model-facing `content` or
+  `details`
+- Python models that are serialized into prompts should use
+  `pydantic-extension` slicing and `model_dump(field_mode="llm")`
+
+### Longer-term direction
+
+The right abstraction is explicit model slicing, with:
+
+- backend fields
+- frontend/operator fields
+- LLM-facing fields
+
+This is now the required direction for Python-side prompt DTOs. TypeScript-side
+plugin/tool responses should follow the same principle by returning explicit
+LLM-safe projections rather than ad hoc key blacklists.
+
+The semantic requirement remains:
+
+- LLM outputs must exclude backend-only graph payload blobs
+- graph truth stays durable and intact
+
 ## Future Refinement Areas
 
 The remaining work is not “replace hybrid persistence.”

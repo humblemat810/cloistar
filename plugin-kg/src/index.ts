@@ -2,12 +2,21 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { KogwistarBridgeClient } from "./kogwistar-client.js";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
+import { sanitizeKgResultForLlm } from "./llm-safe.js";
 
 type PluginConfig = {
   bridgeUrl: string;
   requestTimeoutMs: number;
   logPayloads?: boolean;
 };
+
+function llmToolResult(result: Record<string, unknown>) {
+  const safeResult = sanitizeKgResultForLlm(result);
+  return {
+    content: [{ type: "text", text: JSON.stringify(safeResult) }],
+    details: safeResult,
+  };
+}
 
 export default definePluginEntry({
   id: "kogwistar-kg",
@@ -58,10 +67,7 @@ export default definePluginEntry({
       }),
       async execute(_id, params) {
         const result = await client.kgNodeCreate(params);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          details: result,
-        };
+        return llmToolResult(result);
       },
     });
 
@@ -80,10 +86,7 @@ export default definePluginEntry({
       }),
       async execute(_id, params) {
         const result = await client.kgNodeGet(params);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          details: result,
-        };
+        return llmToolResult(result);
       },
     });
 
@@ -96,10 +99,7 @@ export default definePluginEntry({
       }),
       async execute(_id, params) {
         const result = await client.kgNodeDelete(params.node_id);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          details: result,
-        };
+        return llmToolResult(result);
       },
     });
 
@@ -113,10 +113,7 @@ export default definePluginEntry({
       }),
       async execute(_id, params) {
         const result = await client.kgNodeUpdate(params);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          details: result,
-        };
+        return llmToolResult(result);
       },
     });
 
@@ -136,10 +133,7 @@ export default definePluginEntry({
       }),
       async execute(_id, params) {
         const result = await client.kgEdgeCreate(params);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          details: result,
-        };
+        return llmToolResult(result);
       },
     });
 
@@ -158,10 +152,7 @@ export default definePluginEntry({
       }),
       async execute(_id, params) {
         const result = await client.kgEdgeGet(params);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          details: result,
-        };
+        return llmToolResult(result);
       },
     });
 
@@ -174,10 +165,7 @@ export default definePluginEntry({
       }),
       async execute(_id, params) {
         const result = await client.kgEdgeDelete(params.edge_id);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          details: result,
-        };
+        return llmToolResult(result);
       },
     });
 
@@ -191,10 +179,7 @@ export default definePluginEntry({
       }),
       async execute(_id, params) {
         const result = await client.kgEdgeUpdate(params);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          details: result,
-        };
+        return llmToolResult(result);
       },
     });
 
@@ -209,10 +194,7 @@ export default definePluginEntry({
       }),
       async execute(_id, params) {
         const result = await client.kgQuery(params);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          details: result,
-        };
+        return llmToolResult(result);
       },
     });
 

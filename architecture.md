@@ -149,3 +149,5 @@ sequenceDiagram
   - [plugin-governance/src/index.ts](/home/azureuser/cloistar/plugin-governance/src/index.ts)
 - KG plugin:
   - [plugin-kg/src/index.ts](/home/azureuser/cloistar/plugin-kg/src/index.ts)
+- Future UX direction:
+  - [UX-proposal.md](/home/azureuser/cloistar/UX-proposal.md)

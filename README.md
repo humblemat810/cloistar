@@ -1,13 +1,14 @@
-# Kogwistar × OpenClaw Governance Integration
+# Kogwistar × OpenClaw Governance Semantics Layer
 
-**Graph-native agent governance and knowledge memory for OpenClaw.**
+**A canonical governance semantics layer for agent systems, with graph-native memory and runtime hooks for OpenClaw.**
 
-This repository connects [Kogwistar](./kogwistar/) (a graph-native agent substrate) to [OpenClaw](https://github.com/openclaw/openclaw) via two plugins and a FastAPI bridge. It delivers:
+This repository connects [Kogwistar](./kogwistar/) (a graph-native agent substrate) to [OpenClaw](https://github.com/openclaw/openclaw) via two plugins and a FastAPI bridge. It is not just hook wiring; it is the semantic execution layer under governed agent actions. It delivers:
 
 - **Governance hooks** — real `allow`, `block`, and `requireApproval` decisions on every tool call
 - **Knowledge Graph CRUD** — create, query, redirect, and tombstone nodes/edges from CLI or agent tools
 - **Embeddable bridge** — a standalone FastAPI service that any OpenClaw deployment can point at
 - A **governance/event semantics layer that agent systems usually hand-wave away**
+- A **backbone + semantic-events model** so execution flow and governance meaning stay separate but linked
 
 ---
 
@@ -25,6 +26,7 @@ This repository connects [Kogwistar](./kogwistar/) (a graph-native agent substra
 - Canonical governance events, receipts, approvals, workflow runs, and latest-state projections are persisted durably through the bridge store/service layer.
 - The conversation graph carries semantic governance nodes and edges, including result and terminal completion semantics.
 - The bridge exposes real KG CRUD and query endpoints under `/kg/*`, and the KG plugin exposes those as OpenClaw tools and CLI commands.
+- Each governed tool call gets one canonical backbone, and semantic governance events attach to that backbone rather than replacing it.
 - Two decoupled plugins:
   - `plugin-governance/` — lifecycle hook plugin (governance)
   - `plugin-kg/` — Knowledge Graph CRUD plugin
@@ -35,6 +37,22 @@ This repository connects [Kogwistar](./kogwistar/) (a graph-native agent substra
 - Kogwistar is the current workflow/graph substrate. Some CDC and runtime trace details therefore follow substrate behavior, but the bridge semantics are intended to stay portable to other runtimes if the substrate changes later.
 - Packaging and operator ergonomics are already usable today, but the repo is still tightening the developer/operator experience around install, rebuild, and inspection workflows.
 - The graph/query layer is implemented and durable today, and the remaining work is mainly about making query surfaces, demos, and operator-facing inspection paths clearer and easier to use.
+
+## Core Idea
+
+The central design is:
+
+- one canonical backbone per governed tool call
+- semantic governance events attached to that backbone
+- latest-state projections materialized separately from graph lineage
+
+This means the system keeps three different things distinct:
+
+- execution flow
+- governance meaning
+- operator/debug latest state
+
+Most agent systems collapse those into one noisy stream. This repo does not.
 
 ---
 
@@ -85,6 +103,9 @@ This repository connects [Kogwistar](./kogwistar/) (a graph-native agent substra
 | Run the full local helper stack | [`openclaw-governance-e2e-quickstart.md`](./openclaw-governance-e2e-quickstart.md) | Full operator entrypoint |
 | Run a live `allow`, `block`, or `approval` demo | [`scripts/run-openclaw-gateway-governance-e2e.sh`](./scripts/run-openclaw-gateway-governance-e2e.sh) | Supports `--demo-case allow\|block\|approval` |
 | Use KG CRUD from the CLI | [`kg_integration.md`](./kg_integration.md) | |
+| Read the architecture model | [`architecture.md`](./architecture.md) | Backbone, semantics, and bridge boundary |
+| Read persistence semantics | [`ARD-persistence.md`](./ARD-persistence.md) | Durable graph + projection model |
+| Read future UX direction | [`UX-proposal.md`](./UX-proposal.md) | Operator-facing usability ideas |
 | Run the three-terminal E2E harness | [`scripts/run-openclaw-governance-three-terminal.py`](./scripts/run-openclaw-governance-three-terminal.py) | Supports self-starting and attached-stack flows |
 | Inspect current bridge state | `GET /debug/state` on the bridge | Use `curl http://localhost:8799/debug/state` |
 | Change policy behavior | [`bridge/app/policy.py`](./bridge/app/policy.py) | Controls `allow`, `block`, `requireApproval` |
