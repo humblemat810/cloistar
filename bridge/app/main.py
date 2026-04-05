@@ -340,6 +340,18 @@ def _gateway_approval_requested(kind: str, payload: dict) -> dict:
     return {"ok": True}
 
 
+from .kg_models import (
+    EdgeCreateIn,
+    EdgeGetIn,
+    EdgeUpdateIn,
+    NodeCreateIn,
+    NodeGetIn,
+    NodeUpdateIn,
+    QueryIn,
+)
+from kogwistar.engine_core.models import Node, Edge, Span, Grounding
+
+
 def _gateway_approval_resolved(kind: str, payload: dict) -> dict:
     gateway_record = store.resolve_gateway_approval(kind, payload)
     if gateway_record is None:
@@ -371,3 +383,115 @@ def _gateway_approval_resolved(kind: str, payload: dict) -> dict:
             )
             return _apply_approval_resolution_payload(synthetic_payload, approval=approval)
     return {"ok": True}
+
+
+@app.post("/kg/node/create")
+def kg_node_create(inp: NodeCreateIn) -> dict:
+    eng = get_governance_runtime_host().conversation_engine
+    # Manual CRUD nodes need at least one mention grounding
+    dummy_span = Span.from_dummy_for_conversation("manual_crud")
+    node = Node(
+        label=inp.label,
+        type=inp.type if inp.type in ["entity", "relationship", "reference_pointer"] else "entity",
+        summary=inp.summary or "",
+        properties=inp.properties or {},
+        metadata=inp.metadata or {},
+        doc_id=inp.doc_id,
+        mentions=[Grounding(spans=[dummy_span])]
+    )
+    eng.write.add_node(node)
+    return {"ok": True, "id": node.id}
+
+
+@app.post("/kg/node/get")
+def kg_node_get(inp: NodeGetIn) -> dict:
+    eng = get_governance_runtime_host().conversation_engine
+    nodes = eng.read.get_nodes(
+        ids=inp.ids,
+        where=inp.where,
+        limit=inp.limit,
+        resolve_mode=inp.resolve_mode,
+    )
+    return {"ok": True, "nodes": [n.model_dump(mode="json") for n in nodes]}
+
+
+@app.post("/kg/node/delete")
+def kg_node_delete(node_id: str) -> dict:
+    eng = get_governance_runtime_host().conversation_engine
+    ok = eng.tombstone_node(node_id)
+    return {"ok": ok}
+
+
+@app.post("/kg/node/update")
+def kg_node_update(inp: NodeUpdateIn) -> dict:
+    eng = get_governance_runtime_host().conversation_engine
+    ok = eng.redirect_node(inp.from_id, inp.to_id)
+    return {"ok": ok}
+
+
+@app.post("/kg/edge/create")
+def kg_edge_create(inp: EdgeCreateIn) -> dict:
+    eng = get_governance_runtime_host().conversation_engine
+    # Manual CRUD edges need at least one mention grounding
+    dummy_span = Span.from_dummy_for_conversation("manual_crud")
+    edge = Edge(
+        relation=inp.relation,
+        source_ids=inp.source_ids,
+        target_ids=inp.target_ids,
+        type="relationship",
+        label=inp.label or "",
+        summary=inp.summary or "",
+        properties=inp.properties or {},
+        metadata=inp.metadata or {},
+        doc_id=inp.doc_id,
+        mentions=[Grounding(spans=[dummy_span])],
+        source_edge_ids=[],
+        target_edge_ids=[]
+    )
+    eng.write.add_edge(edge)
+    return {"ok": True, "id": edge.id}
+
+
+@app.post("/kg/edge/get")
+def kg_edge_get(inp: EdgeGetIn) -> dict:
+    eng = get_governance_runtime_host().conversation_engine
+    edges = eng.read.get_edges(
+        ids=inp.ids,
+        where=inp.where,
+        limit=inp.limit,
+        resolve_mode=inp.resolve_mode,
+    )
+    return {"ok": True, "edges": [e.model_dump(mode="json") for e in edges]}
+
+
+@app.post("/kg/edge/delete")
+def kg_edge_delete(edge_id: str) -> dict:
+    eng = get_governance_runtime_host().conversation_engine
+    ok = eng.tombstone_edge(edge_id)
+    return {"ok": ok}
+
+
+@app.post("/kg/edge/update")
+def kg_edge_update(inp: EdgeUpdateIn) -> dict:
+    eng = get_governance_runtime_host().conversation_engine
+    ok = eng.redirect_edge(inp.from_id, inp.to_id)
+    return {"ok": ok}
+
+
+@app.post("/kg/query")
+def kg_query(inp: QueryIn) -> dict:
+    eng = get_governance_runtime_host().conversation_engine
+    nodes_batches = eng.read.query_nodes(
+        query=inp.query,
+        query_embeddings=inp.query_embeddings,
+        where=inp.where,
+        n_results=inp.n_results,
+    )
+    # Flatten batches (one batch per query embedding)
+    nodes = [n for batch in nodes_batches for n in batch]
+    return {"ok": True, "nodes": [n.model_dump(mode="json") for n in nodes]}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8799)

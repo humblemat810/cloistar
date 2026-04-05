@@ -34,7 +34,8 @@ export class KogwistarBridgeClient {
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
-      const res = await fetch(`${this.baseUrl}${path}`, {
+      const fullUrl = `${this.baseUrl}${path}`;
+      const res = await fetch(fullUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
@@ -62,5 +63,41 @@ export class KogwistarBridgeClient {
 
   async emitApprovalResolution(payload: Record<string, unknown>): Promise<{ ok: true }> {
     return this.postJson<{ ok: true }>("/approval/resolution", payload);
+  }
+
+  async kgNodeCreate(payload: Record<string, unknown>): Promise<{ ok: boolean; id: string }> {
+    return this.postJson<{ ok: boolean; id: string }>("/kg/node/create", payload);
+  }
+
+  async kgNodeGet(payload: Record<string, unknown>): Promise<{ ok: boolean; nodes: any[] }> {
+    return this.postJson<{ ok: boolean; nodes: any[] }>("/kg/node/get", payload);
+  }
+
+  async kgNodeDelete(nodeId: string): Promise<{ ok: boolean }> {
+    return this.postJson<{ ok: boolean }>("/kg/node/delete", { node_id: nodeId });
+  }
+
+  async kgNodeUpdate(payload: Record<string, unknown>): Promise<{ ok: boolean }> {
+    return this.postJson<{ ok: boolean }>("/kg/node/update", payload);
+  }
+
+  async kgEdgeCreate(payload: Record<string, unknown>): Promise<{ ok: boolean; id: string }> {
+    return this.postJson<{ ok: boolean; id: string }>("/kg/edge/create", payload);
+  }
+
+  async kgEdgeGet(payload: Record<string, unknown>): Promise<{ ok: boolean; edges: any[] }> {
+    return this.postJson<{ ok: boolean; edges: any[] }>("/kg/edge/get", payload);
+  }
+
+  async kgEdgeDelete(edgeId: string): Promise<{ ok: boolean }> {
+    return this.postJson<{ ok: boolean }>("/kg/edge/delete", { edge_id: edgeId });
+  }
+
+  async kgEdgeUpdate(payload: Record<string, unknown>): Promise<{ ok: boolean }> {
+    return this.postJson<{ ok: boolean }>("/kg/edge/update", payload);
+  }
+
+  async kgQuery(payload: Record<string, unknown>): Promise<{ ok: boolean; nodes: any[] }> {
+    return this.postJson<{ ok: boolean; nodes: any[] }>("/kg/query", payload);
   }
 }
