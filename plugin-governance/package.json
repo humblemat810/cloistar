@@ -1,0 +1,41 @@
+{
+  "name": "@kogwistar/openclaw-governance",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Thin OpenClaw plugin that delegates tool-call governance decisions to a Kogwistar bridge",
+  "keywords": ["openclaw", "kogwistar", "governance", "plugin", "ai-agent"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/humblemat810/cloistar.git",
+    "directory": "plugin-governance"
+  },
+  "bugs": {
+    "url": "https://github.com/humblemat810/cloistar/issues"
+  },
+  "homepage": "https://github.com/humblemat810/cloistar#readme",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "files": ["dist", "openclaw.plugin.json"],
+  "openclaw": {
+    "extensions": ["./dist/index.js"]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "dev": "tsc -w -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.js",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "devDependencies": {
+    "@sinclair/typebox": "^0.34.0",
+    "commander": "^12.0.0",
+    "typescript": "^5.7.0"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.28"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

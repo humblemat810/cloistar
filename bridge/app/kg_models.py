@@ -21,6 +21,9 @@ class NodeUpdateIn(BaseModel):
     from_id: str
     to_id: str
 
+class NodeDeleteIn(BaseModel):
+    node_id: str
+
 class EdgeCreateIn(BaseModel):
     relation: str
     source_ids: List[str]
@@ -41,6 +44,9 @@ class EdgeGetIn(BaseModel):
 class EdgeUpdateIn(BaseModel):
     from_id: str
     to_id: str
+
+class EdgeDeleteIn(BaseModel):
+    edge_id: str
 
 class QueryIn(BaseModel):
     query: Optional[str] = None

@@ -2,25 +2,17 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { KogwistarBridgeClient } from "./kogwistar-client.js";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
-import {
-  type GovernanceApprovalResolution,
-  buildAfterToolCallPayload,
-  buildApprovalResolutionPayload,
-  buildBeforeToolCallPayload,
-  decisionToHookResult,
-} from "./governance-contract.js";
 
 type PluginConfig = {
   bridgeUrl: string;
-  requestTimeoutMs?: number;
-  defaultSeverity?: "info" | "warning" | "critical";
+  requestTimeoutMs: number;
   logPayloads?: boolean;
 };
 
 export default definePluginEntry({
-  id: "kogwistar-governance",
-  name: "Kogwistar Governance",
-  description: "Delegates OpenClaw tool governance decisions to a Kogwistar bridge",
+  id: "kogwistar-kg",
+  name: "Kogwistar Knowledge Graph",
+  description: "Exposes Kogwistar Knowledge Graph CRUD operations as OpenClaw tools",
   configSchema: {
     jsonSchema: {
       type: "object",
@@ -32,14 +24,7 @@ export default definePluginEntry({
         },
         requestTimeoutMs: {
           type: "number",
-          default: 3000,
-        },
-        defaultSeverity: {
-          anyOf: [
-            { type: "string", const: "info" },
-            { type: "string", const: "warning" },
-            { type: "string", const: "critical" },
-          ],
+          default: 30000,
         },
         logPayloads: {
           type: "boolean",
@@ -52,38 +37,9 @@ export default definePluginEntry({
     const cfg = (api.pluginConfig ?? {}) as PluginConfig;
     const client = new KogwistarBridgeClient({
       bridgeUrl: cfg.bridgeUrl ?? "http://127.0.0.1:8799",
-      timeoutMs: cfg.requestTimeoutMs ?? 3000,
-      logPayloads: cfg.logPayloads,
+      timeoutMs: cfg.requestTimeoutMs ?? 30000,
+      logPayloads: cfg.logPayloads ?? false,
       logger: api.logger,
-    });
-
-    api.on(
-      "before_tool_call",
-      async (event, ctx) => {
-        const payload = buildBeforeToolCallPayload(api.id, event, ctx);
-        const decision = await client.evaluateBeforeToolCall(payload);
-
-        return decisionToHookResult({
-          decision,
-          defaultSeverity: cfg.defaultSeverity,
-          onResolution: async (resolution: GovernanceApprovalResolution) => {
-            await client.emitApprovalResolution(
-              buildApprovalResolutionPayload({
-                pluginId: api.id,
-                event,
-                ctx,
-                resolution,
-                approvalId: decision.decision === "requireApproval" ? decision.approvalId ?? null : null,
-              })
-            );
-          },
-        });
-      },
-      { priority: 100 }
-    );
-
-    api.on("after_tool_call", async (event, ctx) => {
-      await client.emitAfterToolCall(buildAfterToolCallPayload(api.id, event, ctx));
     });
 
     // --- KG CRUD Tools ---
@@ -149,8 +105,8 @@ export default definePluginEntry({
 
     api.registerTool({
       name: "kg_update_node",
-      label: "KG: Update Node",
-      description: "Redirect an old node to a new node (update semantics)",
+      label: "KG: Update Node (Redirect)",
+      description: "Redirect an old node ID to a new node ID",
       parameters: Type.Object({
         from_id: Type.String(),
         to_id: Type.String(),
@@ -227,8 +183,8 @@ export default definePluginEntry({
 
     api.registerTool({
       name: "kg_update_edge",
-      label: "KG: Update Edge",
-      description: "Redirect an old edge to a new edge (update semantics)",
+      label: "KG: Update Edge (Redirect)",
+      description: "Redirect an old edge ID to a new edge ID",
       parameters: Type.Object({
         from_id: Type.String(),
         to_id: Type.String(),
@@ -244,12 +200,12 @@ export default definePluginEntry({
 
     api.registerTool({
       name: "kg_query",
-      label: "KG: Query",
-      description: "Semantic search for nodes in the knowledge graph",
+      label: "KG: Query Nodes",
+      description: "Search for nodes in the knowledge graph using semantic query",
       parameters: Type.Object({
-        query: Type.Optional(Type.String()),
+        query: Type.String(),
         where: Type.Optional(Type.Record(Type.String(), Type.Any())),
-        n_results: Type.Number({ default: 20 }),
+        limit: Type.Number({ default: 20 }),
       }),
       async execute(_id, params) {
         const result = await client.kgQuery(params);
@@ -276,8 +232,16 @@ export default definePluginEntry({
         .option("--metadata <json>", "Node metadata (JSON)", (val) => JSON.parse(val))
         .option("--doc-id <doc_id>", "Document ID")
         .action(async (opts) => {
-          const result = await client.kgNodeCreate(opts);
-          process.stderr.write(JSON.stringify(result, null, 2) + "\n");
+          const payload = {
+            label: opts.label,
+            type: opts.type,
+            summary: opts.summary,
+            properties: opts.properties,
+            metadata: opts.metadata,
+            doc_id: opts.docId,
+          };
+          const result = await client.kgNodeCreate(payload);
+          process.stdout.write(JSON.stringify(result, null, 2) + "\n");
         });
 
       node
@@ -288,7 +252,11 @@ export default definePluginEntry({
         .option("--limit <limit>", "Limit result count", (val) => parseInt(val, 10), 200)
         .option("--resolve-mode <mode>", "Active only, redirect, or include tombstones", "active_only")
         .action(async (opts) => {
-          const result = await client.kgNodeGet(opts);
+          const payload = {
+            ...opts,
+            resolve_mode: opts.resolveMode,
+          };
+          const result = await client.kgNodeGet(payload);
           process.stderr.write(JSON.stringify(result, null, 2) + "\n");
         });
 
@@ -305,7 +273,7 @@ export default definePluginEntry({
         .description("Redirect from one node to another")
         .action(async (from_id, to_id) => {
           const result = await client.kgNodeUpdate({ from_id, to_id });
-          process.stderr.write(JSON.stringify(result, null, 2) + "\n");
+          process.stdout.write(JSON.stringify(result, null, 2) + "\n");
         });
 
       const edge = kg.command("edge").description("Edge operations");
@@ -321,8 +289,18 @@ export default definePluginEntry({
         .option("--metadata <json>", "Edge metadata (JSON)", (val) => JSON.parse(val))
         .option("--doc-id <doc_id>", "Document ID")
         .action(async (opts) => {
-          const result = await client.kgEdgeCreate(opts);
-          process.stderr.write(JSON.stringify(result, null, 2) + "\n");
+          const payload = {
+            relation: opts.relation,
+            source_ids: opts.sourceIds,
+            target_ids: opts.targetIds,
+            label: opts.label,
+            summary: opts.summary,
+            properties: opts.properties,
+            metadata: opts.metadata,
+            doc_id: opts.docId,
+          };
+          const result = await client.kgEdgeCreate(payload);
+          process.stdout.write(JSON.stringify(result, null, 2) + "\n");
         });
 
       edge
@@ -333,7 +311,11 @@ export default definePluginEntry({
         .option("--limit <limit>", "Limit result count", (val) => parseInt(val, 10), 400)
         .option("--resolve-mode <mode>", "Active only, redirect, or include tombstones", "active_only")
         .action(async (opts) => {
-          const result = await client.kgEdgeGet(opts);
+          const payload = {
+            ...opts,
+            resolve_mode: opts.resolveMode,
+          };
+          const result = await client.kgEdgeGet(payload);
           process.stderr.write(JSON.stringify(result, null, 2) + "\n");
         });
 
@@ -350,7 +332,7 @@ export default definePluginEntry({
         .description("Redirect from one edge to another")
         .action(async (from_id, to_id) => {
           const result = await client.kgEdgeUpdate({ from_id, to_id });
-          process.stderr.write(JSON.stringify(result, null, 2) + "\n");
+          process.stdout.write(JSON.stringify(result, null, 2) + "\n");
         });
 
       kg.command("query <query>")
@@ -359,7 +341,7 @@ export default definePluginEntry({
         .option("--limit <limit>", "Limit result count", (val) => parseInt(val, 10), 20)
         .action(async (query, opts) => {
           const result = await client.kgQuery({ query, ...opts });
-          process.stderr.write(JSON.stringify(result, null, 2) + "\n");
+          process.stdout.write(JSON.stringify(result, null, 2) + "\n");
         });
     }, {
       descriptors: [{ name: "kg", description: "Kogwistar Knowledge Graph CRUD", hasSubcommands: true }]

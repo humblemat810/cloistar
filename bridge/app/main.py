@@ -6,7 +6,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 
 from .domain.governance_append import append_approval_resolution, append_event, register_approval_request
 from .domain.governance_models import ApprovalRuntimeAttachmentRow
@@ -412,11 +412,11 @@ def kg_node_get(inp: NodeGetIn) -> dict:
         limit=inp.limit,
         resolve_mode=inp.resolve_mode,
     )
-    return {"ok": True, "nodes": [n.model_dump(mode="json") for n in nodes]}
+    return {"ok": True, "nodes": [n.model_dump(field_mode="backend") for n in nodes]}
 
 
 @app.post("/kg/node/delete")
-def kg_node_delete(node_id: str) -> dict:
+def kg_node_delete(node_id: str = Body(..., embed=True)) -> dict:
     eng = get_governance_runtime_host().conversation_engine
     ok = eng.tombstone_node(node_id)
     return {"ok": ok}
@@ -461,11 +461,11 @@ def kg_edge_get(inp: EdgeGetIn) -> dict:
         limit=inp.limit,
         resolve_mode=inp.resolve_mode,
     )
-    return {"ok": True, "edges": [e.model_dump(mode="json") for e in edges]}
+    return {"ok": True, "edges": [e.model_dump(field_mode="backend") for e in edges]}
 
 
 @app.post("/kg/edge/delete")
-def kg_edge_delete(edge_id: str) -> dict:
+def kg_edge_delete(edge_id: str = Body(..., embed=True)) -> dict:
     eng = get_governance_runtime_host().conversation_engine
     ok = eng.tombstone_edge(edge_id)
     return {"ok": ok}
@@ -489,7 +489,7 @@ def kg_query(inp: QueryIn) -> dict:
     )
     # Flatten batches (one batch per query embedding)
     nodes = [n for batch in nodes_batches for n in batch]
-    return {"ok": True, "nodes": [n.model_dump(mode="json") for n in nodes]}
+    return {"ok": True, "nodes": [n.model_dump(field_mode="backend") for n in nodes]}
 
 
 if __name__ == "__main__":

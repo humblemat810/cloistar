@@ -1,0 +1,70 @@
+# Root-level .dockerignore for the bridge image (built from repo root)
+# This keeps the build context lean.
+
+# Version control
+.git
+.gitignore
+.gitmodules
+
+# Python artifacts
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.egg-info
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+.venv
+.tmp
+
+# Node
+**/node_modules
+**/dist
+**/package-lock.json
+**/pnpm-lock.yaml
+
+# IDE / editor
+.vscode
+.idea
+**/.vscode
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+
+# Test / dev artifacts
+collected_tests.json
+test_out.txt
+bridge.log
+bridge_test.log
+.logs
+.cdc_debug
+
+# Docs (not needed at runtime)
+*.md
+*.pdf
+*.txt
+*.sh
+whitepaper.txt
+
+# OpenClaw source (not needed in bridge image)
+openclaw/
+openclaw-demo-trace-plugin/
+
+# Scripts (excluded unless needed for approval listener)
+# scripts/  <- commented out: the bridge imports scripts/lib at runtime
+
+# kogwistar sub-library extras not needed in the image
+kogwistar/.git
+kogwistar/.github
+kogwistar/.venv
+kogwistar/__pycache__
+kogwistar/**/__pycache__
+kogwistar/**/*.pyc
+kogwistar/tests/
+kogwistar/docs/
+kogwistar/assets/
+kogwistar/keycloak/
+kogwistar/*.egg-info
+kogwistar/kogwistar.egg-info

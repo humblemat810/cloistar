@@ -1,0 +1,47 @@
+# Kogwistar × OpenClaw — Quickstart Docker Compose
+#
+# Starts only the governance bridge (the "kogwistar-bridge" service).
+# This is the recommended entry point for new users who want to run
+# the bridge without the full OpenClaw gateway stack.
+#
+# Build note: the build context is the REPO ROOT, not bridge/.
+# This is required so the bridge can include the kogwistar library
+# and pydantic_extension from the local source tree.
+#
+# Usage:
+#   cp .env.example .env          # fill in your env vars
+#   docker compose build
+#   docker compose up -d
+#   curl http://localhost:8799/healthz
+#
+# To run the full hardened stack (bridge + OpenClaw gateway + CLI):
+#   See docker-compose.hardened.yml and openclaw-governance-e2e-quickstart.md
+
+services:
+  bridge:
+    image: kogwistar-bridge:local
+    build:
+      context: .
+      dockerfile: bridge/Dockerfile
+    container_name: kogwistar-bridge
+    ports:
+      - "${BRIDGE_PORT:-8799}:8799"
+    env_file:
+      - .env
+    environment:
+      # Embedding provider — defaults to ollama (local).
+      # Switch to EMBEDDING_PROVIDER=openai and set OPENAI_API_KEY for cloud.
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-minilm:l6-v2}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      # Allow the bridge to reach services on the Docker host (e.g. Ollama).
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8799/healthz')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
