@@ -19,7 +19,24 @@ const __dirname = path.dirname(__filename);
 
 export const repoRoot = path.resolve(__dirname, "..", "..");
 export const bridgePython = path.join(repoRoot, ".venv", "bin", "python");
-const pluginEntryUrl = pathToFileURL(path.join(repoRoot, "plugin", "dist", "index.js")).href;
+const pluginEntryUrl = pathToFileURL(path.join(repoRoot, "plugin-governance", "dist", "index.js")).href;
+
+// ── Env-var overrides ─────────────────────────────────────────────────────
+// Set these in CI or your shell to tune timing without editing test files.
+//
+//   BRIDGE_READINESS_TIMEOUT_MS   max ms to wait for /debug/state → 200
+//                                 (default 300 000 = 5 min)
+//   BRIDGE_REQUEST_TIMEOUT_MS     fetch() timeout for each plugin HTTP call
+//                                 (default 90 000 = 90 s)
+//   BRIDGE_TEST_TIMEOUT_MS        per-test timeout for the Node.js runner
+//                                 (default 120 000 = 2 min)
+//
+export const BRIDGE_READINESS_TIMEOUT_MS =
+  Number(process.env.BRIDGE_READINESS_TIMEOUT_MS ?? 300_000);
+export const BRIDGE_REQUEST_TIMEOUT_MS =
+  Number(process.env.BRIDGE_REQUEST_TIMEOUT_MS ?? 90_000);
+export const BRIDGE_TEST_TIMEOUT_MS =
+  Number(process.env.BRIDGE_TEST_TIMEOUT_MS ?? 120_000);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -88,6 +105,8 @@ export async function startBridge({
   host = "127.0.0.1",
   streamOutput = false,
   extraEnv = {},
+  warmRuntime = true,
+  warmTimeoutMs = BRIDGE_READINESS_TIMEOUT_MS,
 } = {}) {
   const resolvedPort = port ?? (await pickFreePort());
   const bridgeUrl = `http://${host}:${resolvedPort}`;
@@ -159,6 +178,41 @@ export async function startBridge({
     );
   }
 
+  // ── Bridge readiness probe ───────────────────────────────────────────────
+  // uvicorn's TCP port becomes ready long before the Kogwistar runtime
+  // finishes initialising (Chroma engines + WorkflowRuntime + workflow design
+  // install).  The first HTTP request that hits an uninitialised store returns
+  // 500.  /healthz only proves uvicorn is listening — not that the app is
+  // ready to handle governance requests.
+  //
+  // This probe polls /debug/state (which exercises the store layer) and retries
+  // every 500 ms until it returns 200.  That guarantees the bridge is truly
+  // application-ready before tests send their first real request.
+  if (warmRuntime) {
+    const warmStart = Date.now();
+    let warmed = false;
+    while (Date.now() - warmStart < warmTimeoutMs) {
+      if (child.exitCode !== null) {
+        child.kill("SIGTERM");
+        throw new Error(
+          `bridge process exited during readiness probe (code=${child.exitCode})`
+        );
+      }
+      try {
+        const r = await fetch(`${bridgeUrl}/debug/state`);
+        if (r.ok) { warmed = true; break; }
+      } catch (_) {/* not yet */}
+      await sleep(500);
+    }
+    if (!warmed) {
+      child.kill("SIGTERM");
+      throw new Error(
+        `bridge failed readiness probe within ${warmTimeoutMs}ms at ${bridgeUrl}`
+      );
+    }
+  }
+
+
   return {
     bridgeUrl,
     host,
@@ -166,14 +220,15 @@ export async function startBridge({
     child,
     stdout,
     stderr,
-    async stop() {
+    async stop({ timeoutMs = 5_000 } = {}) {
       if (child.exitCode !== null) {
         return;
       }
       child.kill("SIGTERM");
-      await new Promise((resolve) => {
-        child.once("exit", resolve);
-      });
+      await Promise.race([
+        new Promise((resolve) => { child.once("exit", resolve); }),
+        sleep(timeoutMs).then(() => { child.kill("SIGKILL"); }),
+      ]);
     },
   };
 }
@@ -186,7 +241,7 @@ export async function startBridge({
  */
 export async function loadPluginHandlers({
   bridgeUrl,
-  requestTimeoutMs = 3_000,
+  requestTimeoutMs = BRIDGE_REQUEST_TIMEOUT_MS,
   defaultSeverity = "warning",
   logPayloads = true,
 } = {}) {

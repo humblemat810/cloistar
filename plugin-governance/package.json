@@ -4,7 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Thin OpenClaw plugin that delegates tool-call governance decisions to a Kogwistar bridge",
-  "keywords": ["openclaw", "kogwistar", "governance", "plugin", "ai-agent"],
+  "keywords": [
+    "openclaw",
+    "kogwistar",
+    "governance",
+    "plugin",
+    "ai-agent"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/humblemat810/cloistar.git",
@@ -16,15 +22,22 @@
   "homepage": "https://github.com/humblemat810/cloistar#readme",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
-  "files": ["dist", "openclaw.plugin.json"],
+  "files": [
+    "dist",
+    "openclaw.plugin.json"
+  ],
   "openclaw": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist",
     "dev": "tsc -w -p tsconfig.json",
-    "test": "npm run build && node --test test/*.test.js",
+    "test": "npm run build && node --test test/governance-contract.test.js",
+    "test:integration": "npm run build && node --test test/live-bridge.integration.test.js",
+    "test:all": "npm run build && node --test test/*.test.js",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "devDependencies": {
@@ -37,5 +50,9 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "titanic-expedition": "^0.1.1",
+    "zod": "^4.3.6"
   }
 }

@@ -1,4 +1,4 @@
-import test from "node:test";
+import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
 /**
@@ -12,6 +12,7 @@ import {
   fetchBridgeState,
   loadPluginHandlers,
   startBridge,
+  BRIDGE_TEST_TIMEOUT_MS,
 } from "../../scripts/lib/openclaw-governance-harness.mjs";
 
 function makeContext(toolName, sessionId, overrides = {}) {
@@ -26,9 +27,46 @@ function makeContext(toolName, sessionId, overrides = {}) {
   };
 }
 
-test("plugin and bridge allow a safe tool call and record completion", async () => {
-  const bridge = await startBridge();
-  try {
+/**
+ * Each test here spawns a real Python bridge process.
+ * concurrency: false ensures they run sequentially so bridge processes
+ * do not compete for CPU.
+ *
+ * t.after() guarantees bridge shutdown even when the test times out or is
+ * aborted by the runner.  t.signal fires on timeout/cancel so we can SIGTERM
+ * the bridge immediately rather than waiting for the graceful stop timeout.
+ *
+ * ── Developer debug cheatsheet ────────────────────────────────────────────
+ * Start the bridge manually (from repo root):
+ *
+ *   PYTHONPATH=. .venv/bin/python -m uvicorn bridge.app.main:app \
+ *     --host 127.0.0.1 --port 19800
+ *
+ * Probe before-tool-call (allow path):
+ *
+ *   curl -s -X POST http://127.0.0.1:19800/policy/before-tool-call \
+ *     -H "Content-Type: application/json" \
+ *     -d '{"pluginId":"kogwistar-governance","sessionId":"sess-x","toolName":"read","params":{}}'
+ *
+ * Read bridge state:
+ *
+ *   curl -s http://127.0.0.1:19800/debug/state | python3 -m json.tool
+ *
+ * Run just one integration test (pattern match):
+ *
+ *   node --test --test-name-pattern "allow a safe" \
+ *     test/live-bridge.integration.test.js
+ *
+ * The first request per bridge is slow (~30-90 s) because the Kogwistar
+ * runtime initialises lazily.  Subsequent requests are fast.
+ * ─────────────────────────────────────────────────────────────────────────
+ */
+describe("live bridge integration", { concurrency: false }, () => {
+  test("plugin and bridge allow a safe tool call and record completion", { timeout: BRIDGE_TEST_TIMEOUT_MS }, async (t) => {
+    const bridge = await startBridge();
+    t.after(() => bridge.stop());
+    t.signal.addEventListener("abort", () => bridge.stop(), { once: true });
+
     const plugin = await loadPluginHandlers({ bridgeUrl: bridge.bridgeUrl });
     assert.equal(typeof plugin.beforeToolCall, "function");
     assert.equal(typeof plugin.afterToolCall, "function");
@@ -61,20 +99,22 @@ test("plugin and bridge allow a safe tool call and record completion", async () 
       [
         "governance.tool_call_observed.v1",
         "governance.decision_recorded.v1",
+        "governance.result_recorded.v1",
+        "governance.completed.v1",
         "governance.tool_call_completed.v1",
       ]
     );
     assert.equal(state.events[1].data.disposition, "allow");
-    assert.equal(state.events[2].data.outcome, "success");
+    // tool_call_completed is now at index 4 (result_recorded + completed precede it)
+    assert.equal(state.events[4].data.outcome, "success");
     assert.equal(state.receipts.length, 2);
-  } finally {
-    await bridge.stop();
-  }
-});
+  });
 
-test("plugin and bridge block dangerous commands", async () => {
-  const bridge = await startBridge();
-  try {
+  test("plugin and bridge block dangerous commands", { timeout: BRIDGE_TEST_TIMEOUT_MS }, async (t) => {
+    const bridge = await startBridge();
+    t.after(() => bridge.stop());
+    t.signal.addEventListener("abort", () => bridge.stop(), { once: true });
+
     const plugin = await loadPluginHandlers({ bridgeUrl: bridge.bridgeUrl });
 
     const decision = await plugin.beforeToolCall(
@@ -98,18 +138,22 @@ test("plugin and bridge block dangerous commands", async () => {
     const state = await fetchBridgeState(bridge.bridgeUrl);
     assert.deepEqual(
       state.events.map((entry) => entry.eventType),
-      ["governance.tool_call_observed.v1", "governance.decision_recorded.v1"]
+      [
+        "governance.tool_call_observed.v1",
+        "governance.decision_recorded.v1",
+        "governance.result_recorded.v1",
+        "governance.completed.v1",
+      ]
     );
     assert.equal(state.events[1].data.disposition, "block");
     assert.deepEqual(state.approvals, {});
-  } finally {
-    await bridge.stop();
-  }
-});
+  });
 
-test("plugin and bridge round-trip approval resolution with real OpenClaw resolution values", async () => {
-  const bridge = await startBridge();
-  try {
+  test("plugin and bridge round-trip approval resolution with real OpenClaw resolution values", { timeout: BRIDGE_TEST_TIMEOUT_MS }, async (t) => {
+    const bridge = await startBridge();
+    t.after(() => bridge.stop());
+    t.signal.addEventListener("abort", () => bridge.stop(), { once: true });
+
     const plugin = await loadPluginHandlers({ bridgeUrl: bridge.bridgeUrl });
     const event = {
       toolName: "exec",
@@ -162,20 +206,21 @@ test("plugin and bridge round-trip approval resolution with real OpenClaw resolu
         "governance.execution_suspended.v1",
         "governance.approval_resolved.v1",
         "governance.execution_resumed.v1",
+        "governance.result_recorded.v1",
+        "governance.completed.v1",
         "governance.tool_call_completed.v1",
       ]
     );
     assert.equal(state.events[4].data.approvalRequestId, approvalId);
     assert.equal(state.events[4].data.resolution, "allow_once");
     assert.equal(state.events[5].data.resumeMode, "single_use");
-  } finally {
-    await bridge.stop();
-  }
-});
+  });
 
-test("plugin and bridge record deny approval resolutions", async () => {
-  const bridge = await startBridge();
-  try {
+  test("plugin and bridge record deny approval resolutions", { timeout: BRIDGE_TEST_TIMEOUT_MS }, async (t) => {
+    const bridge = await startBridge();
+    t.after(() => bridge.stop());
+    t.signal.addEventListener("abort", () => bridge.stop(), { once: true });
+
     const plugin = await loadPluginHandlers({ bridgeUrl: bridge.bridgeUrl });
     const decision = await plugin.beforeToolCall(
       {
@@ -204,11 +249,11 @@ test("plugin and bridge record deny approval resolutions", async () => {
         "governance.execution_suspended.v1",
         "governance.approval_resolved.v1",
         "governance.execution_denied.v1",
+        "governance.result_recorded.v1",
+        "governance.completed.v1",
       ]
     );
     assert.equal(state.events[4].data.resolution, "deny");
     assert.equal(state.events[5].data.denyReason, "approval_denied");
-  } finally {
-    await bridge.stop();
-  }
-});
+  });
+}); // end describe("live bridge integration")
