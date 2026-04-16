@@ -81,15 +81,14 @@ Most agent systems collapse those into one noisy stream. This repo does not.
 │   ├── openclaw.plugin.json
 │   └── package.json
 ├── kogwistar/           Kogwistar Python library (git submodule / local dev)
-├── pydantic_extension/  Local pydantic_extension dev copy
 ├── scripts/             Helper E2E and demo scripts
 ├── docker-compose.yml         ← Quickstart: bridge only
 ├── docker-compose.hardened.yml ← Full stack: bridge + OpenClaw gateway + CLI
 ├── QUICKSTART.md        ← START HERE
 ├── kg_integration.md    KG CRUD integration guide
 ├── architecture.md      Component topology
-├── ARD.md               Main roadmap
-├── ARD-persistence.md   Persistence roadmap
+├── ARD.md               Current project status and near-term direction
+├── ARD-persistence.md   Persistence semantics and durability notes
 └── openclaw-governance-e2e-quickstart.md  Full operator E2E guide
 ```
 
@@ -116,7 +115,7 @@ Most agent systems collapse those into one noisy stream. This repo does not.
 
 ### Bridge (Docker)
 
-Build from the repo root (required — the image bundles `kogwistar` and `pydantic_extension`):
+Build from the repo root (required — the image bundles the local `kogwistar` source and the bridge app together):
 
 ```bash
 docker compose build       # builds kogwistar-bridge:local

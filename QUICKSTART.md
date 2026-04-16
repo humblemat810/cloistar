@@ -90,8 +90,6 @@ source .venv/bin/activate
 
 ```bash
 pip install -e ./kogwistar[server]
-# Also needed for the bridge's local pydantic_extension
-pip install -e .   # installs pydantic_extension from the repo root
 ```
 
 ### 2d. Install bridge dependencies
@@ -295,7 +293,7 @@ See [`.env.example`](./.env.example) for the full list.
 > Make sure you `docker build` from the **repo root** (`docker compose build` from `cloistar/`), not from inside `bridge/`.
 
 **Pydantic serialization errors**
-> Ensure `field_mode="backend"` is used consistently with `mode="json"` in model dumps. See [pitfall.md](./pitfall.md).
+> Use the installed `pydantic-extension` package from the venv. Do not rely on a repo-local shadow copy. See [pitfall.md](./pitfall.md).
 
 **OpenClaw plugin config not updating**
 > OpenClaw caches plugin configs. Run `openclaw extension reload <plugin-id>` after changing config.

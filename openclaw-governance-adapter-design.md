@@ -56,7 +56,7 @@ Observed upstream boundary shape:
 Primary source references:
 
 - [openclaw/src/plugins/types.ts](/home/azureuser/cloistar/openclaw/src/plugins/types.ts#L2140)
-- [plugin/src/governance-contract.ts](/home/azureuser/cloistar/plugin/src/governance-contract.ts#L1)
+- [plugin-governance/src/governance-contract.ts](/home/azureuser/cloistar/plugin-governance/src/governance-contract.ts#L1)
 - [bridge/app/models.py](/home/azureuser/cloistar/bridge/app/models.py#L7)
 
 This upstream contract is good for pausing or blocking a tool call inside
