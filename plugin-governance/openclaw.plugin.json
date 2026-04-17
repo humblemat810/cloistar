@@ -1,6 +1,6 @@
 {
   "id": "kogwistar-governance",
-  "name": "@kogwistar/openclaw-governance",
+  "name": "@humblemat/cloister-openclaw-governance",
   "description": "Delegates OpenClaw tool governance decisions to a Kogwistar bridge",
   "version": "0.1.0",
   "type": "module",

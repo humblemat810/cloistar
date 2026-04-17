@@ -12,8 +12,9 @@ type PluginConfig = {
 
 function llmToolResult(result: Record<string, unknown>) {
   const safeResult = sanitizeKgResultForLlm(result);
+  const content = [{ type: "text" as const, text: JSON.stringify(safeResult) }];
   return {
-    content: [{ type: "text", text: JSON.stringify(safeResult) }],
+    content,
     details: safeResult,
   };
 }

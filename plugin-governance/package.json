@@ -1,7 +1,7 @@
 {
-  "name": "@kogwistar/openclaw-governance",
+  "name": "@humblemat/cloister-openclaw-governance",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
   "description": "Thin OpenClaw plugin that delegates tool-call governance decisions to a Kogwistar bridge",
   "keywords": [
@@ -47,6 +47,9 @@
   },
   "peerDependencies": {
     "openclaw": ">=2026.3.28"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=18"
