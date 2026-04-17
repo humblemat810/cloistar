@@ -122,15 +122,41 @@ docker compose build       # builds kogwistar-bridge:local
 docker compose up -d       # starts bridge on port 8799
 ```
 
-### Kogwistar (Python library)
+### Cloister (Python library)
 
 ```bash
 # From source (development)
-pip install -e ./kogwistar[server]
+pip install -e .[server]
 
 # From PyPI (once published)
-pip install "kogwistar[server]"
+pip install "cloister[server]"
 ```
+
+### OpenClaw Integration
+
+If OpenClaw is already installed, Cloister can detect it and print the exact plugin install commands:
+
+```bash
+cloister install-openclaw
+```
+
+If OpenClaw is not installed yet, the same command still writes a local client-side governance config and keeps the bridge usable on its own.
+
+The import namespace remains `kogwistar` internally, but the published Python distribution name is `cloister`.
+
+You can also override the bridge URL when your governance bridge is running somewhere else:
+
+```bash
+cloister install-openclaw --bridge-url http://127.0.0.1:8799
+```
+
+If you have a local OpenClaw checkout instead of a global CLI install, point the installer at it explicitly:
+
+```bash
+cloister install-openclaw --openclaw-home /home/azureuser/cloistar/openclaw
+```
+
+That same command also accepts `--openclaw-repo` and `--openclaw-cli` if you want to override the repo path or the CLI binary directly.
 
 ### OpenClaw Plugins (NPM)
 
