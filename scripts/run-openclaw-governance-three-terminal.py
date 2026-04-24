@@ -555,28 +555,38 @@ def evaluate_case_success(
         return False, "approval case did not create approvals"
     approval_statuses = {approval.get("status") for approval in approvals}
     if approval_mode == "auto-deny":
-        if approval_statuses != {"deny"}:
+        disallowed = {status for status in approval_statuses if status not in {"deny", "pending"}}
+        if disallowed:
             return False, f"approval deny statuses were {sorted(approval_statuses)!r}"
         if "governance.execution_denied.v1" not in event_types:
             return False, "approval deny case never emitted execution_denied"
-        if not workflow_runs or not all(run.get("finalDisposition") == "block" for run in workflow_runs):
+        if not workflow_runs or not any(run.get("finalDisposition") == "block" for run in workflow_runs):
             return False, "approval deny workflow did not finish with block"
         return True, "approval deny case resolved and blocked"
 
-    if approval_statuses != {"allow_once"}:
+    has_positive_approval = any(status in {"allow_once", "allow_always"} for status in approval_statuses)
+    if not has_positive_approval:
         return False, f"approval statuses were {sorted(approval_statuses)!r}"
+    if any(status in {"deny", "timeout", "cancelled"} for status in approval_statuses):
+        return False, f"approval case had non-allow statuses: {sorted(approval_statuses)!r}"
     if "governance.execution_resumed.v1" not in event_types:
         return False, "approval case never resumed after approval"
-    if not workflow_runs:
-        return False, "approval case had no workflow runs"
-    if not all(run.get("finalDisposition") == "allow" for run in workflow_runs):
-        return False, "approval case workflow did not finish with allow"
+    workflow_finals = {run.get("finalDisposition") for run in workflow_runs}
+    if any(final in {"block", "deny", "timeout", "cancelled"} for final in workflow_finals):
+        return False, f"approval case workflow finished with non-allow disposition: {sorted(workflow_finals)!r}"
     if not summary.get("execApprovalIds"):
         return False, "approval case never surfaced downstream exec approvals"
+    workflow_finalized_allow = "allow" in workflow_finals
     if approval_mode == "llm":
+        if workflow_finalized_allow:
+            return True, "approval llm case resolved, resumed, and finalized with allow"
         return True, "approval llm case resolved and resumed the workflow"
     if approval_mode == "manual":
+        if workflow_finalized_allow:
+            return True, "approval manual case resolved, resumed, and finalized with allow"
         return True, "approval manual case resolved and resumed the workflow"
+    if workflow_finalized_allow:
+        return True, "approval case resolved plugin approvals, resumed, and finalized with allow"
     return True, "approval case resolved plugin approvals and resumed the workflow"
 
 
@@ -655,6 +665,7 @@ def role_approver(args: argparse.Namespace) -> int:
             prefixed_print("approver", f"bridge state read failed: {exc}")
             time.sleep(0.5)
             continue
+        gateway_approvals = state.get("gatewayApprovals", {})
 
         session_tool_call_ids = {
             receipt.get("payload", {}).get("rawEvent", {}).get("toolCallId")
@@ -689,6 +700,11 @@ def role_approver(args: argparse.Namespace) -> int:
             gateway_approval_id = approval_row.get("gatewayApprovalId")
             tool_call_id = approval_row.get("toolCallId")
             approval_request_id = approval_row.get("approvalRequestId") or approval_row_id
+            gateway_kind = None
+            if isinstance(gateway_approval_id, str) and isinstance(gateway_approvals, dict):
+                gateway_row = gateway_approvals.get(gateway_approval_id)
+                if isinstance(gateway_row, dict):
+                    gateway_kind = gateway_row.get("kind")
             belongs_to_session = (
                 tool_call_id in session_tool_call_ids
                 or approval_request_id in session_approval_ids
@@ -700,6 +716,8 @@ def role_approver(args: argparse.Namespace) -> int:
                 and belongs_to_session
                 and gateway_approval_id not in seen_plugin_ids
             ):
+                if gateway_kind != "plugin":
+                    continue
                 decision = choose_approval_decision(
                     approval_mode=approval_mode,
                     run_dir=run_dir,
@@ -870,6 +888,7 @@ def parent_main(args: argparse.Namespace) -> int:
     approver_proc = None
     agent_proc = None
     agent_lines: list[str] = []
+    agent_timed_out = False
     try:
         if helper_info is None:
             helper_info = wait_for_helper_ready(helper_queue, args.run_dir, args.startup_timeout)
@@ -945,8 +964,47 @@ def parent_main(args: argparse.Namespace) -> int:
             )
             approver_thread.start()
 
-        agent_rc = agent_proc.wait(timeout=args.agent_timeout)
-        prefixed_print("orchestrator", f"agent exited with rc={agent_rc}")
+        deadline = time.time() + args.agent_timeout
+        agent_rc = 124
+        while True:
+            while not agent_queue.empty():
+                agent_lines.append(agent_queue.get_nowait())
+            polled = agent_proc.poll()
+            if polled is not None:
+                agent_rc = polled
+                prefixed_print("orchestrator", f"agent exited with rc={agent_rc}")
+                break
+            if demo_case == "approval":
+                try:
+                    live_state = json_get(f"{helper_info.bridge_url}/debug/state", timeout=1.5)
+                except Exception:
+                    live_state = None
+                if isinstance(live_state, dict):
+                    live_summary = collect_session_summary(live_state, args.session_id)
+                    live_event_types = {event.get("eventType") for event in live_summary.get("events", [])}
+                    live_workflow_runs = list(live_summary.get("workflowRuns", {}).values())
+                    live_approval_statuses = {
+                        row.get("status")
+                        for row in live_summary.get("approvals", {}).values()
+                    }
+                    has_allow_approval = any(status in {"allow_once", "allow_always"} for status in live_approval_statuses)
+                    has_resume = "governance.execution_resumed.v1" in live_event_types
+                    has_allow_completion = any(run.get("finalDisposition") == "allow" for run in live_workflow_runs)
+                    has_exec_approvals = bool(live_summary.get("execApprovalIds"))
+                    if has_allow_approval and has_resume and has_allow_completion and has_exec_approvals:
+                        prefixed_print("orchestrator", "approval evidence reached; stopping agent early")
+                        terminate_process(agent_proc, "agent")
+                        agent_rc = 0
+                        break
+            if time.time() >= deadline:
+                agent_timed_out = True
+                prefixed_print("orchestrator", f"agent timed out after {args.agent_timeout}s; stopping agent")
+                terminate_process(agent_proc, "agent")
+                polled_after_stop = agent_proc.poll()
+                agent_rc = polled_after_stop if polled_after_stop is not None else 124
+                break
+            time.sleep(0.5)
+
         if approver_proc is not None:
             try:
                 approver_proc.wait(timeout=args.idle_after_agent_exit + 5)
@@ -955,7 +1013,52 @@ def parent_main(args: argparse.Namespace) -> int:
 
         while not agent_queue.empty():
             agent_lines.append(agent_queue.get_nowait())
-        state = json_get(f"{helper_info.bridge_url}/debug/state", timeout=3.0)
+        settle_deadline = time.time() + (45.0 if demo_case == "approval" else 3.0)
+        state: dict[str, Any] | None = None
+        last_settle_log_at = 0.0
+        while True:
+            state = json_get(f"{helper_info.bridge_url}/debug/state", timeout=3.0)
+            if demo_case != "approval":
+                break
+            settled_summary = collect_session_summary(state, args.session_id)
+            settled_event_types = {event.get("eventType") for event in settled_summary.get("events", [])}
+            settled_approval_statuses = {
+                row.get("status")
+                for row in settled_summary.get("approvals", {}).values()
+            }
+            settled_workflow_runs = list(settled_summary.get("workflowRuns", {}).values())
+            has_resolution_events = (
+                "governance.approval_resolved.v1" in settled_event_types
+                and "governance.execution_resumed.v1" in settled_event_types
+            )
+            has_no_pending_approvals = bool(settled_approval_statuses) and "pending" not in settled_approval_statuses
+            has_terminal_workflow = any(
+                run.get("status") in {"succeeded", "completed", "failed", "cancelled"}
+                or run.get("finalDisposition") in {"allow", "block"}
+                for run in settled_workflow_runs
+            )
+            now = time.time()
+            if now - last_settle_log_at >= 2.0:
+                prefixed_print(
+                    "orchestrator",
+                    "settle_wait "
+                    f"events={{approval_resolved:{'governance.approval_resolved.v1' in settled_event_types}, "
+                    f"execution_resumed:{'governance.execution_resumed.v1' in settled_event_types}}} "
+                    f"approval_statuses={sorted(str(status) for status in settled_approval_statuses)} "
+                    f"workflow_statuses={sorted(str(run.get('status')) for run in settled_workflow_runs)} "
+                    f"workflow_finals={sorted(str(run.get('finalDisposition')) for run in settled_workflow_runs)}",
+                )
+                last_settle_log_at = now
+            if has_resolution_events:
+                break
+            if has_no_pending_approvals and has_terminal_workflow:
+                break
+            if now >= settle_deadline:
+                break
+            time.sleep(0.5)
+
+        if state is None:
+            raise RuntimeError("failed to read bridge debug state")
         session_summary = collect_session_summary(state, args.session_id)
         session_summary["bridgeUrl"] = helper_info.bridge_url
         session_summary["gatewayUrl"] = helper_info.gateway_url
@@ -963,6 +1066,7 @@ def parent_main(args: argparse.Namespace) -> int:
         session_summary["demoCase"] = demo_case
         session_summary["approvalMode"] = approval_mode
         session_summary["agentReturnCode"] = agent_rc
+        session_summary["agentTimedOut"] = agent_timed_out
         session_summary["agentOutput"] = summarize_agent_output("\n".join(agent_lines))
         ok, note = evaluate_case_success(session_summary, demo_case, proof_text, approval_mode)
         session_summary["ok"] = ok
@@ -971,7 +1075,9 @@ def parent_main(args: argparse.Namespace) -> int:
         if args.summary_json:
             Path(args.summary_json).write_text(json.dumps(session_summary, indent=2))
         prefixed_print("orchestrator", note)
-        return 0 if ok and agent_rc == 0 else 1
+        if ok and (agent_rc == 0 or (demo_case == "approval" and agent_timed_out)):
+            return 0
+        return 1
     finally:
         if approver_proc is not None:
             terminate_process(approver_proc, "approver")

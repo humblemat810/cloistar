@@ -8,8 +8,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Body, Query
 
-from .domain.governance_append import append_approval_resolution, append_event, register_approval_request
-from .domain.governance_models import ApprovalRuntimeAttachmentRow
+from .domain.governance_append import append_event, register_approval_request
+from .domain.governance_models import ApprovalRequestSpec, ApprovalRuntimeAttachmentRow
 from .integrations.openclaw_dto import (
     OpenClawAfterToolCallPayload,
     OpenClawApprovalResolutionPayload,
@@ -30,6 +30,18 @@ from .policy import decide
 from .projections.openclaw_projection import project_decision
 from .runtime import get_governance_runtime_host
 from .store import store
+
+
+def _approval_debug_enabled() -> bool:
+    value = os.getenv("BRIDGE_APPROVAL_DEBUG", "1").strip().lower()
+    return value not in {"0", "false", "off", "no"}
+
+
+def _approval_debug(message: str, **fields: object) -> None:
+    if not _approval_debug_enabled():
+        return
+    detail = " ".join(f"{k}={fields[k]!r}" for k in sorted(fields))
+    print(f"[bridge-approval-debug] {message}" + (f" {detail}" if detail else ""), file=sys.stderr, flush=True)
 
 
 def _repo_root() -> Path:
@@ -111,6 +123,16 @@ def _apply_approval_resolution_payload(
     *,
     approval: dict,
 ) -> dict:
+    _approval_debug(
+        "apply_resolution:start",
+        approvalId=payload.approvalId,
+        governanceCallId=approval.get("governanceCallId"),
+        sessionId=payload.sessionId,
+        toolName=payload.toolName,
+        resolution=payload.resolution,
+        approvalStatus=approval.get("status"),
+        suspensionId=approval.get("suspensionId"),
+    )
     receipt = build_receipt("approval_resolution", payload)
     store.record_receipt(receipt)
 
@@ -126,15 +148,82 @@ def _apply_approval_resolution_payload(
         resolved_event,
         follow_up_event,
     )
-    updated = append_approval_resolution(
-        store,
-        resolved_event,
-        follow_up_event,
-        result_event=result_event,
-        completed_event=completed_event,
+    updated = store.resolve_approval(
+        resolved_event.data.approvalRequestId,
+        resolved_event.data.resolution,
+        resolved_event.data.resolvedAt.isoformat(),
     )
     if updated is None:
+        _approval_debug(
+            "apply_resolution:resolve_failed",
+            approvalId=payload.approvalId,
+            governanceCallId=approval.get("governanceCallId"),
+        )
         raise HTTPException(status_code=404, detail="approval not found")
+    _approval_debug(
+        "apply_resolution:resolve_ok",
+        approvalId=payload.approvalId,
+        governanceCallId=approval.get("governanceCallId"),
+        updatedStatus=updated.get("status") if isinstance(updated, dict) else None,
+    )
+    _approval_debug(
+        "apply_resolution:append_event:start",
+        approvalId=payload.approvalId,
+        governanceCallId=approval.get("governanceCallId"),
+        eventType=resolved_event.eventType,
+    )
+    append_event(store, resolved_event)
+    _approval_debug(
+        "apply_resolution:append_event:ok",
+        approvalId=payload.approvalId,
+        governanceCallId=approval.get("governanceCallId"),
+        eventType=resolved_event.eventType,
+    )
+    _approval_debug(
+        "apply_resolution:append_event:start",
+        approvalId=payload.approvalId,
+        governanceCallId=approval.get("governanceCallId"),
+        eventType=follow_up_event.eventType,
+    )
+    append_event(store, follow_up_event)
+    _approval_debug(
+        "apply_resolution:append_event:ok",
+        approvalId=payload.approvalId,
+        governanceCallId=approval.get("governanceCallId"),
+        eventType=follow_up_event.eventType,
+    )
+    _approval_debug(
+        "apply_resolution:append_event:start",
+        approvalId=payload.approvalId,
+        governanceCallId=approval.get("governanceCallId"),
+        eventType=result_event.eventType,
+    )
+    append_event(store, result_event)
+    _approval_debug(
+        "apply_resolution:append_event:ok",
+        approvalId=payload.approvalId,
+        governanceCallId=approval.get("governanceCallId"),
+        eventType=result_event.eventType,
+    )
+    _approval_debug(
+        "apply_resolution:append_event:start",
+        approvalId=payload.approvalId,
+        governanceCallId=approval.get("governanceCallId"),
+        eventType=completed_event.eventType,
+    )
+    append_event(store, completed_event)
+    _approval_debug(
+        "apply_resolution:append_event:ok",
+        approvalId=payload.approvalId,
+        governanceCallId=approval.get("governanceCallId"),
+        eventType=completed_event.eventType,
+    )
+    _approval_debug(
+        "apply_resolution:append_ok",
+        approvalId=payload.approvalId,
+        governanceCallId=approval.get("governanceCallId"),
+        updatedStatus=updated.get("status") if isinstance(updated, dict) else None,
+    )
 
     runtime_resume = None
     try:
@@ -144,14 +233,33 @@ def _apply_approval_resolution_payload(
             resolved_at=resolved_event.data.resolvedAt.isoformat(),
         )
     except Exception as exc:
+        _approval_debug(
+            "apply_resolution:runtime_resume_error",
+            approvalId=payload.approvalId,
+            governanceCallId=approval.get("governanceCallId"),
+            error=str(exc),
+        )
         store.upsert_workflow_run(
             approval["governanceCallId"],
             {"resumeError": str(exc)},
         )
 
     if runtime_resume is not None:
+        _approval_debug(
+            "apply_resolution:runtime_resume_ok",
+            approvalId=payload.approvalId,
+            governanceCallId=approval.get("governanceCallId"),
+            workflowStatus=runtime_resume.workflow.get("status"),
+            workflowFinalDisposition=runtime_resume.workflow.get("finalDisposition"),
+        )
         store.upsert_workflow_run(approval["governanceCallId"], runtime_resume.workflow)
         store.upsert_governance_projection(approval["governanceCallId"], runtime_resume.projection)
+    else:
+        _approval_debug(
+            "apply_resolution:runtime_resume_none",
+            approvalId=payload.approvalId,
+            governanceCallId=approval.get("governanceCallId"),
+        )
 
     return {"ok": True}
 
@@ -242,6 +350,26 @@ def before_tool_call(payload: OpenClawBeforeToolCallPayload) -> dict:
     decision_event = decision_event_from_policy(observed_event, evaluation)
     append_event(store, decision_event)
 
+    if evaluation.disposition == "require_approval" and evaluation.approval is None:
+        fallback_eval = decide(observed_event.data.tool.name, observed_event.data.tool.params)
+        fallback_spec = fallback_eval.approval if fallback_eval.disposition == "require_approval" else None
+        ensured_spec = fallback_spec or ApprovalRequestSpec(
+            title=f"Approval required for {observed_event.data.tool.name or 'tool'}",
+            description="Bridge backfilled approval because runtime evaluation omitted approval details.",
+            severity="warning",
+            timeoutMs=600_000,
+            timeoutBehavior="deny",
+            approvalScope="once",
+        )
+        _approval_debug(
+            "before_tool_call:backfilled_missing_approval_spec",
+            governanceCallId=observed_event.subject.governanceCallId,
+            toolName=observed_event.data.tool.name,
+            source="policy_fallback" if fallback_spec is not None else "bridge_default",
+            decision=evaluation.disposition,
+        )
+        evaluation = evaluation.model_copy(update={"approval": ensured_spec})
+
     approval_id: str | None = None
     if evaluation.disposition == "require_approval" and evaluation.approval is not None:
         approval_event, suspended_event = approval_events_from_policy(decision_event, evaluation.approval)
@@ -263,6 +391,41 @@ def before_tool_call(payload: OpenClawBeforeToolCallPayload) -> dict:
                 approval_id,
                 runtime_attachment,
             )
+        # Race guard: gateway approval may already be resolved before the bridge
+        # creates the canonical approval row. If so, reconcile immediately.
+        approval_row = store.get_approval(approval_id)
+        if isinstance(approval_row, dict) and approval_row.get("status") == "pending":
+            gateway_approval_id = approval_row.get("gatewayApprovalId")
+            if isinstance(gateway_approval_id, str) and gateway_approval_id:
+                gateway_row = store.get_gateway_approval(gateway_approval_id)
+                if isinstance(gateway_row, dict):
+                    gateway_decision = gateway_row.get("decision") or gateway_row.get("status")
+                    deferred_resolution = _gateway_decision_to_resolution(
+                        gateway_decision if isinstance(gateway_decision, str) else None
+                    )
+                    if deferred_resolution is not None and gateway_row.get("status") != "pending":
+                        _approval_debug(
+                            "before_tool_call:reconcile_deferred_gateway_resolution",
+                            approvalId=approval_id,
+                            gatewayApprovalId=gateway_approval_id,
+                            gatewayStatus=gateway_row.get("status"),
+                            gatewayDecision=gateway_row.get("decision"),
+                            deferredResolution=deferred_resolution,
+                        )
+                        request = gateway_row.get("request")
+                        request_data = request if isinstance(request, dict) else {}
+                        synthetic_payload = OpenClawApprovalResolutionPayload(
+                            pluginId="openclaw.gateway.deferred",
+                            sessionId=request_data.get("sessionKey") or approval_row.get("sessionId"),
+                            toolName=request_data.get("toolName") or approval_row.get("toolName"),
+                            resolution=deferred_resolution,
+                            approvalId=approval_id,
+                            rawEvent={
+                                "deferredGatewayApprovalId": gateway_approval_id,
+                                "gatewayRecord": dict(gateway_row),
+                            },
+                        )
+                        _apply_approval_resolution_payload(synthetic_payload, approval=approval_row)
     elif evaluation.disposition in {"allow", "block"}:
         result_event, completed_event = result_and_completion_events_from_policy(decision_event)
         append_event(store, result_event)
@@ -353,10 +516,30 @@ from kogwistar.engine_core.models import Node, Edge, Span, Grounding
 
 
 def _gateway_approval_resolved(kind: str, payload: dict) -> dict:
+    _approval_debug(
+        "gateway_resolved:start",
+        kind=kind,
+        gatewayApprovalId=payload.get("id"),
+        decision=payload.get("decision"),
+        request=payload.get("request"),
+    )
     gateway_record = store.resolve_gateway_approval(kind, payload)
     if gateway_record is None:
+        _approval_debug(
+            "gateway_resolved:no_gateway_record",
+            kind=kind,
+            gatewayApprovalId=payload.get("id"),
+        )
         return {"ok": True}
 
+    _approval_debug(
+        "gateway_resolved:gateway_record",
+        kind=kind,
+        gatewayApprovalId=gateway_record.get("gatewayApprovalId"),
+        bridgeApprovalId=gateway_record.get("bridgeApprovalId"),
+        gatewayStatus=gateway_record.get("status"),
+        request=gateway_record.get("request"),
+    )
     bridge_approval_id = gateway_record.get("bridgeApprovalId")
     resolution = _gateway_decision_to_resolution(payload.get("decision"))
     request = payload.get("request")
@@ -364,9 +547,19 @@ def _gateway_approval_resolved(kind: str, payload: dict) -> dict:
     approval = None
     if isinstance(bridge_approval_id, str) and bridge_approval_id:
         approval = store.get_approval(bridge_approval_id)
+        _approval_debug(
+            "gateway_resolved:lookup_by_bridge_id",
+            bridgeApprovalId=bridge_approval_id,
+            found=approval is not None,
+        )
     if approval is None:
         approval = store.find_approval_for_gateway_request(
             request_data if request_data else gateway_record.get("request") or {}
+        )
+        _approval_debug(
+            "gateway_resolved:lookup_by_request",
+            request=request_data if request_data else gateway_record.get("request"),
+            found=approval is not None,
         )
         if approval is not None:
             bridge_approval_id = approval.get("approvalRequestId")
@@ -374,10 +567,33 @@ def _gateway_approval_resolved(kind: str, payload: dict) -> dict:
         gateway_approval_id = gateway_record.get("gatewayApprovalId")
         if isinstance(gateway_approval_id, str) and gateway_approval_id:
             approval = store.find_approval_for_gateway_approval_id(gateway_approval_id)
+            _approval_debug(
+                "gateway_resolved:lookup_by_gateway_id",
+                gatewayApprovalId=gateway_approval_id,
+                found=approval is not None,
+            )
+            if approval is not None:
+                bridge_approval_id = approval.get("approvalRequestId")
+    if approval is None:
+        session_key = request_data.get("sessionKey")
+        if isinstance(session_key, str) and session_key:
+            approval = store.find_pending_approval_for_session(session_key)
+            _approval_debug(
+                "gateway_resolved:lookup_by_session",
+                sessionKey=session_key,
+                found=approval is not None,
+            )
             if approval is not None:
                 bridge_approval_id = approval.get("approvalRequestId")
     if isinstance(bridge_approval_id, str) and bridge_approval_id and resolution is not None:
         approval = approval or store.get_approval(bridge_approval_id)
+        _approval_debug(
+            "gateway_resolved:pre_apply",
+            bridgeApprovalId=bridge_approval_id,
+            resolution=resolution,
+            hasApproval=approval is not None,
+            approvalStatus=approval.get("status") if isinstance(approval, dict) else None,
+        )
         if approval is not None and approval.get("status") == "pending":
             synthetic_payload = OpenClawApprovalResolutionPayload(
                 pluginId="openclaw.gateway",
@@ -387,7 +603,22 @@ def _gateway_approval_resolved(kind: str, payload: dict) -> dict:
                 approvalId=bridge_approval_id,
                 rawEvent=dict(payload),
             )
+            _approval_debug(
+                "gateway_resolved:applying_resolution",
+                bridgeApprovalId=bridge_approval_id,
+                sessionId=synthetic_payload.sessionId,
+                toolName=synthetic_payload.toolName,
+                resolution=synthetic_payload.resolution,
+            )
             return _apply_approval_resolution_payload(synthetic_payload, approval=approval)
+    _approval_debug(
+        "gateway_resolved:no_apply",
+        kind=kind,
+        bridgeApprovalId=bridge_approval_id,
+        resolution=resolution,
+        hasApproval=approval is not None,
+        approvalStatus=approval.get("status") if isinstance(approval, dict) else None,
+    )
     return {"ok": True}
 
 

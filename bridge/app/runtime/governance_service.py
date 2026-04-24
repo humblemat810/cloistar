@@ -14,6 +14,8 @@ come from metadata, deterministic ids, and backbone/link relations.
 from dataclasses import dataclass
 import hashlib
 import json
+import os
+import sys
 import time
 from typing import Any, Literal, Protocol, Sequence, TypeAlias, overload
 
@@ -90,6 +92,18 @@ SEMANTIC_EVENT_ENTITY_TYPES: dict[str, str] = {
     "governance.tool_call_completed.v1": "governance_completion",
 }
 GENERIC_EVENT_ENTITY_TYPE = "governance_event"
+
+
+def _approval_debug_enabled() -> bool:
+    value = os.getenv("BRIDGE_APPROVAL_DEBUG", "1").strip().lower()
+    return value not in {"0", "false", "off", "no"}
+
+
+def _approval_debug(message: str, **fields: object) -> None:
+    if not _approval_debug_enabled():
+        return
+    detail = " ".join(f"{k}={fields[k]!r}" for k in sorted(fields))
+    print(f"[governance-service-debug] {message}" + (f" {detail}" if detail else ""), file=sys.stderr, flush=True)
 
 
 class GraphWritePort(Protocol):
@@ -203,6 +217,15 @@ class GovernanceService:
         """Persist one approval summary record with stable identity."""
         record: ApprovalRow = payload
         record["approvalRequestId"] = approval_id
+        _approval_debug(
+            "upsert_approval_record:start",
+            approvalId=approval_id,
+            governanceCallId=record.get("governanceCallId"),
+            status=record.get("status"),
+            sessionId=record.get("sessionId"),
+            toolName=record.get("toolName"),
+            gatewayApprovalId=record.get("gatewayApprovalId"),
+        )
         self._persist_record(
             record_kind="approval",
             record_id=approval_id,
@@ -220,6 +243,12 @@ class GovernanceService:
             summary=f"Approval record for {record.get('toolName') or 'tool'}",
         )
         self._project_latest_record("approval", approval_id, record)
+        _approval_debug(
+            "upsert_approval_record:done",
+            approvalId=approval_id,
+            projectedNamespace=BRIDGE_GOVERNANCE_PROJECTION_NAMESPACE,
+            projectionKey=self._projection_key("approval", approval_id),
+        )
         return record
 
     def upsert_gateway_approval_record(
@@ -248,6 +277,14 @@ class GovernanceService:
             summary="OpenClaw gateway approval record",
         )
         self._project_latest_record("gateway_approval", gateway_approval_id, record)
+        _approval_debug(
+            "upsert_gateway_approval_record",
+            gatewayApprovalId=gateway_approval_id,
+            kind=record.get("kind"),
+            status=record.get("status"),
+            decision=record.get("decision"),
+            bridgeApprovalId=record.get("bridgeApprovalId"),
+        )
         return record
 
     def upsert_workflow_run_record(
@@ -589,6 +626,12 @@ class GovernanceService:
         meta = getattr(self.conversation_engine, "meta_sqlite", None)
         replacer = getattr(meta, "replace_named_projection", None)
         if not callable(replacer):
+            if record_kind in {"approval", "gateway_approval"}:
+                _approval_debug(
+                    "project_latest_record:skip_no_replacer",
+                    recordKind=record_kind,
+                    recordId=record_id,
+                )
             return
         replacer(
             BRIDGE_GOVERNANCE_PROJECTION_NAMESPACE,
@@ -599,6 +642,13 @@ class GovernanceService:
             projection_schema_version=1,
             materialization_status="ready",
         )
+        if record_kind in {"approval", "gateway_approval"}:
+            _approval_debug(
+                "project_latest_record:ok",
+                recordKind=record_kind,
+                recordId=record_id,
+                projectionKey=self._projection_key(record_kind, record_id),
+            )
 
     def _projection_seq_for_record(self, payload: GovernanceRecord) -> int:
         """Best-effort seq watermark for bridge governance projection rows."""
@@ -693,6 +743,12 @@ class GovernanceService:
         if record_kind in STRUCTURED_RECORD_KINDS:
             projected_records = self._load_projected_records(record_kind)
             if projected_records:
+                if record_kind in {"approval", "gateway_approval"}:
+                    _approval_debug(
+                        "load_records:from_projection",
+                        recordKind=record_kind,
+                        count=len(projected_records),
+                    )
                 return projected_records
         graph_records = self._load_graph_records(record_kind)
         if record_kind in STRUCTURED_RECORD_KINDS and isinstance(graph_records, dict) and graph_records:
@@ -701,11 +757,29 @@ class GovernanceService:
                     self._project_latest_record(record_kind, projected_id, projected_record)
             projected_records = self._load_projected_records(record_kind)
             if projected_records:
+                if record_kind in {"approval", "gateway_approval"}:
+                    _approval_debug(
+                        "load_records:from_graph_then_project",
+                        recordKind=record_kind,
+                        graphCount=len(graph_records),
+                        projectedCount=len(projected_records),
+                    )
                 return projected_records
         if graph_records is not None:
+            if record_kind in {"approval", "gateway_approval"} and isinstance(graph_records, dict):
+                _approval_debug(
+                    "load_records:graph_only",
+                    recordKind=record_kind,
+                    graphCount=len(graph_records),
+                )
             return graph_records
         if record_kind in {"event", "receipt"}:
             return []
+        if record_kind in {"approval", "gateway_approval"}:
+            _approval_debug(
+                "load_records:empty",
+                recordKind=record_kind,
+            )
         return {}
 
     def _load_projected_records(
@@ -730,6 +804,13 @@ class GovernanceService:
             payload = row.get("payload")
             if isinstance(payload, dict):
                 projected[record_id] = payload
+        if record_kind in {"approval", "gateway_approval"}:
+            _approval_debug(
+                "load_projected_records",
+                recordKind=record_kind,
+                count=len(projected),
+                sampleIds=list(projected.keys())[:5],
+            )
         return projected
 
     def _load_graph_records(

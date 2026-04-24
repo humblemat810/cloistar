@@ -8,6 +8,8 @@ graph state rather than Python process memory.
 """
 
 from dataclasses import dataclass
+import os
+import sys
 from typing import Any, TypeVar, TypedDict
 
 from .domain.governance_models import (
@@ -38,6 +40,18 @@ class PartialApprovalSubscriptionStatusRow(TypedDict, total=False):
 
 
 TGatewayApprovalRow = TypeVar("TGatewayApprovalRow", bound=GatewayApprovalRow)
+
+
+def _approval_debug_enabled() -> bool:
+    value = os.getenv("BRIDGE_APPROVAL_DEBUG", "1").strip().lower()
+    return value not in {"0", "false", "off", "no"}
+
+
+def _approval_debug(message: str, **fields: object) -> None:
+    if not _approval_debug_enabled():
+        return
+    detail = " ".join(f"{k}={fields[k]!r}" for k in sorted(fields))
+    print(f"[bridge-store-debug] {message}" + (f" {detail}" if detail else ""), file=sys.stderr, flush=True)
 
 
 @dataclass
@@ -85,7 +99,38 @@ class PersistentGovernanceStore:
             "sessionId": event.correlationId,
             "toolName": observed.get("data", {}).get("tool", {}).get("name"),
         }
+        existing = self._service().get_record("approval", approval_id)
+        if isinstance(existing, dict):
+            merged = dict(existing)
+            for key, value in approval_record.items():
+                if value is None:
+                    continue
+                merged[key] = value
+
+            existing_status = existing.get("status")
+            if isinstance(existing_status, str) and existing_status and existing_status != "pending":
+                merged["status"] = existing_status
+                resolved_at = existing.get("resolvedAt")
+                if isinstance(resolved_at, str) and resolved_at:
+                    merged["resolvedAt"] = resolved_at
+                _approval_debug(
+                    "register_approval_request:preserved_terminal_status",
+                    approvalId=approval_id,
+                    existingStatus=existing_status,
+                    incomingStatus=approval_record.get("status"),
+                )
+            approval_record = merged
+
         approval_record = self._service().upsert_approval_record(approval_id, approval_record)
+        _approval_debug(
+            "register_approval_request",
+            approvalId=approval_id,
+            governanceCallId=approval_record.get("governanceCallId"),
+            status=approval_record.get("status"),
+            suspensionId=approval_record.get("suspensionId"),
+            sessionId=approval_record.get("sessionId"),
+            toolName=approval_record.get("toolName"),
+        )
         return self._attach_gateway_approval(approval_record)
 
     def register_gateway_approval(
@@ -148,6 +193,15 @@ class PersistentGovernanceStore:
             ),
         }
         gateway_record = self._service().upsert_gateway_approval_record(gateway_approval_id, gateway_record)
+        _approval_debug(
+            "resolve_gateway_approval:upsert",
+            kind=kind,
+            gatewayApprovalId=gateway_approval_id,
+            decision=gateway_record.get("decision"),
+            status=gateway_record.get("status"),
+            bridgeApprovalId=gateway_record.get("bridgeApprovalId"),
+            sessionKey=(request_data or {}).get("sessionKey") if isinstance(request_data, dict) else None,
+        )
         gateway_record = self._attach_bridge_approval(gateway_record)
         self.update_approval_subscription_status(
             {
@@ -164,14 +218,45 @@ class PersistentGovernanceStore:
         resolved_at: str | None = None,
     ) -> ApprovalRow | None:
         current = self.get_approval(approval_id)
+        _approval_debug(
+            "resolve_approval:lookup",
+            approvalId=approval_id,
+            found=current is not None,
+            currentStatus=current.get("status") if isinstance(current, dict) else None,
+            resolution=resolution,
+        )
         if current is None or current.get("status") != "pending":
             return None
         current["status"] = resolution
         current["resolvedAt"] = resolved_at or current.get("resolvedAt") or current["requestedAt"]
+        _approval_debug(
+            "resolve_approval:upsert",
+            approvalId=approval_id,
+            resolution=resolution,
+            resolvedAt=current.get("resolvedAt"),
+        )
         return self._service().upsert_approval_record(approval_id, current)
 
     def get_approval(self, approval_id: str) -> ApprovalRow | None:
         record = self._service().get_record("approval", approval_id)
+        _approval_debug(
+            "get_approval",
+            approvalId=approval_id,
+            found=isinstance(record, dict),
+            status=record.get("status") if isinstance(record, dict) else None,
+        )
+        return dict(record) if isinstance(record, dict) else None
+
+    def get_gateway_approval(self, gateway_approval_id: str) -> GatewayApprovalRow | None:
+        record = self._service().get_record("gateway_approval", gateway_approval_id)
+        _approval_debug(
+            "get_gateway_approval",
+            gatewayApprovalId=gateway_approval_id,
+            found=isinstance(record, dict),
+            status=record.get("status") if isinstance(record, dict) else None,
+            decision=record.get("decision") if isinstance(record, dict) else None,
+            bridgeApprovalId=record.get("bridgeApprovalId") if isinstance(record, dict) else None,
+        )
         return dict(record) if isinstance(record, dict) else None
 
     def find_approval_for_gateway_request(self, request: GatewayApprovalRequestRef | dict[str, Any]) -> ApprovalRow | None:
@@ -182,9 +267,11 @@ class PersistentGovernanceStore:
 
         exact_match: ApprovalRow | None = None
         fallback_match: ApprovalRow | None = None
+        candidate_count = 0
         for approval_row in self._service().list_records("approval"):
             if approval_row.get("status") != "pending":
                 continue
+            candidate_count += 1
             if isinstance(tool_call_id, str) and tool_call_id and approval_row.get("toolCallId") == tool_call_id:
                 exact_match = dict(approval_row)
                 break
@@ -198,15 +285,102 @@ class PersistentGovernanceStore:
                 and approval_row.get("sessionId") == session_key
             ):
                 fallback_match = dict(approval_row)
+        _approval_debug(
+            "find_approval_for_gateway_request",
+            toolCallId=tool_call_id,
+            toolName=tool_name,
+            sessionKey=session_key,
+            candidates=candidate_count,
+            exact=exact_match.get("approvalRequestId") if isinstance(exact_match, dict) else None,
+            fallback=fallback_match.get("approvalRequestId") if isinstance(fallback_match, dict) else None,
+        )
         return exact_match or fallback_match
+
+    def find_pending_approval_for_session(self, session_id: str) -> ApprovalRow | None:
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        candidate_count = 0
+        for approval_row in self._service().list_records("approval"):
+            if approval_row.get("status") != "pending":
+                continue
+            candidate_count += 1
+            if approval_row.get("sessionId") == session_id:
+                _approval_debug(
+                    "find_pending_approval_for_session:direct_hit",
+                    sessionId=session_id,
+                    candidates=candidate_count,
+                    approvalId=approval_row.get("approvalRequestId"),
+                )
+                return dict(approval_row)
+
+        snapshot = self.snapshot()
+        events = snapshot.get("events", [])
+        if not isinstance(events, list):
+            return None
+        governance_call_ids: list[str] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            if event.get("eventType") != "governance.tool_call_observed.v1":
+                continue
+            event_data = event.get("data", {})
+            execution_context = event_data.get("executionContext", {}) if isinstance(event_data, dict) else {}
+            if execution_context.get("sessionId") != session_id:
+                continue
+            subject = event.get("subject", {})
+            governance_call_id = subject.get("governanceCallId") if isinstance(subject, dict) else None
+            if isinstance(governance_call_id, str) and governance_call_id and governance_call_id not in governance_call_ids:
+                governance_call_ids.append(governance_call_id)
+
+        for governance_call_id in reversed(governance_call_ids):
+            rebuilt = self._rebuild_pending_approval_from_events(governance_call_id)
+            if rebuilt is not None:
+                _approval_debug(
+                    "find_pending_approval_for_session:rebuilt_hit",
+                    sessionId=session_id,
+                    governanceCallId=governance_call_id,
+                    approvalId=rebuilt.get("approvalRequestId"),
+                )
+                return rebuilt
+        _approval_debug(
+            "find_pending_approval_for_session:no_match",
+            sessionId=session_id,
+            directCandidates=candidate_count,
+            governanceCalls=governance_call_ids,
+        )
+        return None
+
+    def find_pending_approval_for_governance_call(self, governance_call_id: str) -> ApprovalRow | None:
+        if not isinstance(governance_call_id, str) or not governance_call_id:
+            return None
+        best_match: ApprovalRow | None = None
+        best_requested_at = ""
+        for approval_row in self._service().list_records("approval"):
+            if approval_row.get("status") != "pending":
+                continue
+            if approval_row.get("governanceCallId") != governance_call_id:
+                continue
+            requested_at = str(approval_row.get("requestedAt") or "")
+            if best_match is None or requested_at >= best_requested_at:
+                best_match = dict(approval_row)
+                best_requested_at = requested_at
+        _approval_debug(
+            "find_pending_approval_for_governance_call",
+            governanceCallId=governance_call_id,
+            approvalId=best_match.get("approvalRequestId") if isinstance(best_match, dict) else None,
+            requestedAt=best_requested_at or None,
+        )
+        return best_match
 
     def find_approval_for_gateway_approval_id(self, gateway_approval_id: str) -> ApprovalRow | None:
         if not isinstance(gateway_approval_id, str) or not gateway_approval_id:
             return None
         approval_by_governance_call: dict[str, ApprovalRow] = {}
+        pending_count = 0
         for approval_row in self._service().list_records("approval"):
             if approval_row.get("status") != "pending":
                 continue
+            pending_count += 1
             governance_call_id = approval_row.get("governanceCallId")
             if isinstance(governance_call_id, str) and governance_call_id:
                 approval_by_governance_call[governance_call_id] = dict(approval_row)
@@ -229,10 +403,29 @@ class PersistentGovernanceStore:
             if isinstance(governance_call_id, str):
                 approval_row = approval_by_governance_call.get(governance_call_id)
                 if approval_row is not None:
+                    _approval_debug(
+                        "find_approval_for_gateway_approval_id:direct_hit",
+                        gatewayApprovalId=gateway_approval_id,
+                        governanceCallId=governance_call_id,
+                        approvalId=approval_row.get("approvalRequestId"),
+                        pendingCount=pending_count,
+                    )
                     return approval_row
                 rebuilt = self._rebuild_pending_approval_from_events(governance_call_id)
                 if rebuilt is not None:
+                    _approval_debug(
+                        "find_approval_for_gateway_approval_id:rebuilt_hit",
+                        gatewayApprovalId=gateway_approval_id,
+                        governanceCallId=governance_call_id,
+                        approvalId=rebuilt.get("approvalRequestId"),
+                        pendingCount=pending_count,
+                    )
                     return rebuilt
+        _approval_debug(
+            "find_approval_for_gateway_approval_id:no_match",
+            gatewayApprovalId=gateway_approval_id,
+            pendingCount=pending_count,
+        )
         return None
 
     def _rebuild_pending_approval_from_events(self, governance_call_id: str) -> ApprovalRow | None:
@@ -298,6 +491,10 @@ class PersistentGovernanceStore:
             suspension_event = suspension_by_approval_id.get(approval_id)
             suspension_data = suspension_event.get("data", {}) if isinstance(suspension_event, dict) else {}
             suspension_id = suspension_data.get("suspensionId")
+            if not isinstance(suspension_id, str) or not suspension_id:
+                workflow_suspension_id = workflow_run.get("suspensionId") or workflow_run.get("suspendedTokenId")
+                if isinstance(workflow_suspension_id, str) and workflow_suspension_id:
+                    suspension_id = workflow_suspension_id
             if not isinstance(decision_id, str) or not decision_id:
                 continue
             if not isinstance(requested_event_id, str) or not requested_event_id:
@@ -341,8 +538,25 @@ class PersistentGovernanceStore:
                 approval_record["runtimeProjection"] = dict(projection)
 
             rebuilt = self._service().upsert_approval_record(approval_id, approval_record)
+            _approval_debug(
+                "rebuild_pending_approval:upserted",
+                governanceCallId=governance_call_id,
+                approvalId=approval_id,
+                decisionId=decision_id,
+                suspensionId=suspension_id,
+                status=approval_record.get("status"),
+                sessionId=approval_record.get("sessionId"),
+                toolName=approval_record.get("toolName"),
+            )
             return dict(rebuilt)
 
+        _approval_debug(
+            "rebuild_pending_approval:none",
+            governanceCallId=governance_call_id,
+            approvalEvents=len(approval_events),
+            resolvedApprovals=len(resolved_approval_ids),
+            hasObservedEvent=observed_event is not None,
+        )
         return None
 
     def snapshot(self) -> DebugStateSnapshot:
@@ -439,6 +653,11 @@ class PersistentGovernanceStore:
 
     def _attach_gateway_approval(self, approval_row: ApprovalRow) -> ApprovalRow:
         tool_call_id = approval_row.get("toolCallId")
+        _approval_debug(
+            "attach_gateway_approval:start",
+            approvalId=approval_row.get("approvalRequestId"),
+            toolCallId=tool_call_id,
+        )
         for gateway_row in self._service().list_records("gateway_approval"):
             gateway_approval_id = gateway_row.get("gatewayApprovalId")
             if not isinstance(gateway_approval_id, str) or not gateway_approval_id:
@@ -459,6 +678,11 @@ class PersistentGovernanceStore:
             self._service().upsert_approval_record(approval_row["approvalRequestId"], approval_row)
             gateway_row["bridgeApprovalId"] = approval_row["approvalRequestId"]
             self._service().upsert_gateway_approval_record(gateway_approval_id, gateway_row)
+            _approval_debug(
+                "attach_gateway_approval:linked",
+                approvalId=approval_row.get("approvalRequestId"),
+                gatewayApprovalId=gateway_approval_id,
+            )
             break
         return dict(approval_row)
 
@@ -467,6 +691,13 @@ class PersistentGovernanceStore:
         request_match = self.find_approval_for_gateway_request(request) if isinstance(request, dict) else None
         receipt_match = self.find_approval_for_gateway_approval_id(gateway_row["gatewayApprovalId"])
         approval_row = request_match or receipt_match
+        _approval_debug(
+            "attach_bridge_approval",
+            gatewayApprovalId=gateway_row.get("gatewayApprovalId"),
+            requestMatch=request_match.get("approvalRequestId") if isinstance(request_match, dict) else None,
+            receiptMatch=receipt_match.get("approvalRequestId") if isinstance(receipt_match, dict) else None,
+            selected=approval_row.get("approvalRequestId") if isinstance(approval_row, dict) else None,
+        )
         if approval_row is not None:
             approval_row["gatewayApprovalId"] = gateway_row["gatewayApprovalId"]
             self._service().upsert_approval_record(approval_row["approvalRequestId"], approval_row)
