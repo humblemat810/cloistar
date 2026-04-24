@@ -24,7 +24,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 OPENCLAW_DIR="$ROOT_DIR/openclaw"
-PLUGIN_DIR="$ROOT_DIR/plugin"
+DEFAULT_PLUGIN_DIR="$ROOT_DIR/plugin-governance"
+LEGACY_PLUGIN_DIR="$ROOT_DIR/plugin"
+if [[ -d "$DEFAULT_PLUGIN_DIR" ]]; then
+  PLUGIN_DIR="${PLUGIN_DIR:-$DEFAULT_PLUGIN_DIR}"
+else
+  PLUGIN_DIR="${PLUGIN_DIR:-$LEGACY_PLUGIN_DIR}"
+fi
 BRIDGE_PYTHON="$ROOT_DIR/.venv/bin/python"
 OPENCLAW_ENTRY="$OPENCLAW_DIR/openclaw.mjs"
 
@@ -363,6 +369,13 @@ fi
 
 mkdir -p "$RUN_DIR/logs" "$RUN_DIR/state" "$RUN_DIR/workspace" "$RUN_DIR/home"
 log_step "Run directory: $RUN_DIR"
+log_step "Using governance plugin dir: $PLUGIN_DIR"
+
+if [[ ("$SKIP_PLUGIN_BUILD" != "1" || "$SKIP_PLUGIN_INSTALL" != "1") && ! -d "$PLUGIN_DIR" ]]; then
+  echo "ERROR: governance plugin directory not found: $PLUGIN_DIR" >&2
+  echo "Hint: set PLUGIN_DIR to the correct path (for this repo typically $ROOT_DIR/plugin-governance)." >&2
+  exit 1
+fi
 
 STATE_DIR="$RUN_DIR/state"
 WORKSPACE_DIR="$RUN_DIR/workspace"

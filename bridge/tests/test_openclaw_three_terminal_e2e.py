@@ -37,6 +37,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -46,6 +47,7 @@ HARNESS = ROOT_DIR / "scripts" / "run-openclaw-governance-three-terminal.py"
 PYTHON = ROOT_DIR / ".venv" / "bin" / "python"
 
 pytestmark = [pytest.mark.e2e]
+DEFAULT_LIVE_OUTPUT: Final[str] = "1"
 
 
 def _e2e_enabled() -> bool:
@@ -54,6 +56,32 @@ def _e2e_enabled() -> bool:
 
 def _manual_e2e_enabled() -> bool:
     return os.getenv("OPENCLAW_RUN_MANUAL_E2E") == "1"
+
+
+def _live_output_enabled() -> bool:
+    return os.getenv("OPENCLAW_E2E_LIVE_OUTPUT", DEFAULT_LIVE_OUTPUT) == "1"
+
+
+def _run_harness(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    live_output = _live_output_enabled()
+    print(
+        f"[e2e] running harness live_output={live_output} timeout={timeout}s\n"
+        f"[e2e] command: {' '.join(command)}"
+    )
+    return subprocess.run(
+        command,
+        cwd=ROOT_DIR,
+        text=True,
+        capture_output=not live_output,
+        check=False,
+        timeout=timeout,
+    )
+
+
+def _result_debug_text(result: subprocess.CompletedProcess[str]) -> str:
+    if result.stdout is None and result.stderr is None:
+        return "stdout/stderr captured by terminal (OPENCLAW_E2E_LIVE_OUTPUT=1)."
+    return f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
 
 
 @pytest.mark.skipif(not _e2e_enabled(), reason="Set OPENCLAW_RUN_E2E=1 to run live OpenClaw E2E tests")
@@ -85,25 +113,19 @@ def test_openclaw_three_terminal_policy_e2e(tmp_path: Path, demo_case: str, appr
         str(run_dir),
         "--summary-json",
         str(summary_path),
+        "--startup-timeout",
+        "420",
         "--agent-timeout",
         "420",
     ]
-    result = subprocess.run(
-        command,
-        cwd=ROOT_DIR,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=600,
-    )
+    result = _run_harness(command, timeout=600)
 
-    assert summary_path.exists(), f"missing summary file\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert summary_path.exists(), f"missing summary file\n{_result_debug_text(result)}"
     summary = json.loads(summary_path.read_text())
 
     assert result.returncode == 0, (
         f"harness failed for {demo_case}\n"
-        f"stdout:\n{result.stdout}\n"
-        f"stderr:\n{result.stderr}\n"
+        f"{_result_debug_text(result)}\n"
         f"summary:\n{json.dumps(summary, indent=2)}"
     )
     assert summary["ok"] is True
@@ -146,20 +168,25 @@ def test_openclaw_three_terminal_policy_e2e_manual(tmp_path: Path) -> None:
         str(run_dir),
         "--summary-json",
         str(summary_path),
+        "--startup-timeout",
+        "420",
         "--agent-timeout",
         "420",
     ]
-    result = subprocess.run(
-        command,
-        cwd=ROOT_DIR,
-        text=True,
-        check=False,
-        timeout=900,
-    )
+    result = _run_harness(command, timeout=900)
 
-    assert summary_path.exists(), f"missing summary file\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert summary_path.exists(), f"missing summary file\n{_result_debug_text(result)}"
     summary = json.loads(summary_path.read_text())
     assert result.returncode == 0, json.dumps(summary, indent=2)
     assert summary["ok"] is True
     assert summary["demoCase"] == "approval"
     assert summary["approvalMode"] == "manual"
+
+
+"""Cheat sheet manual
+OPENCLAW_RUN_E2E=1 OPENCLAW_E2E_LIVE_OUTPUT=1 /home/azureuser/cloistar/.venv/bin/python -m pytest -s -vv bridge/tests/test_openclaw_three_terminal_e2e.py -k 'allow-auto-allow'
+OPENCLAW_RUN_E2E=1 OPENCLAW_E2E_LIVE_OUTPUT=1 /home/azureuser/cloistar/.venv/bin/python -m pytest -s -vv bridge/tests/test_openclaw_three_terminal_e2e.py -k 'block-auto-allow'
+OPENCLAW_RUN_E2E=1 OPENCLAW_E2E_LIVE_OUTPUT=1 /home/azureuser/cloistar/.venv/bin/python -m pytest -s -vv bridge/tests/test_openclaw_three_terminal_e2e.py -k 'approval-auto-allow'
+
+
+"""

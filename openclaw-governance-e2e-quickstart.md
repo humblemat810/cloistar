@@ -778,6 +778,31 @@ For the `approval` case, the harness supports these approval modes:
 - `llm`
   - Use a second OpenClaw agent call as a simple approval judge that returns `ALLOW_ONCE` or `DENY`.
 
+Workflow view for the four commonly run live cases:
+
+```mermaid
+flowchart TD
+    A[Start three-terminal harness] --> B{demo-case}
+    B -->|allow| C[read proof.txt]
+    C --> D[Policy returns allow]
+    D --> E[Tool completes]
+
+    B -->|block| F[exec rm -rf ./blocked-demo]
+    F --> G[Policy returns block]
+    G --> H[No approval created]
+
+    B -->|approval + auto-allow| I[exec echo hello]
+    I --> J[Policy returns requireApproval]
+    J --> K[Auto approver sends allow-once]
+    K --> L[Execution resumes and completes]
+
+    B -->|approval + llm| M[exec echo hello]
+    M --> N[Policy returns requireApproval]
+    N --> O[Second LLM decides ALLOW_ONCE or DENY]
+    O --> P[Bridge resolves approval]
+    P --> Q[Resume on allow or deny on block]
+```
+
 Important meaning of `approval --approval-mode llm` today:
 
 - This is a harness-level LLM approver.

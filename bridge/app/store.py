@@ -230,6 +230,119 @@ class PersistentGovernanceStore:
                 approval_row = approval_by_governance_call.get(governance_call_id)
                 if approval_row is not None:
                     return approval_row
+                rebuilt = self._rebuild_pending_approval_from_events(governance_call_id)
+                if rebuilt is not None:
+                    return rebuilt
+        return None
+
+    def _rebuild_pending_approval_from_events(self, governance_call_id: str) -> ApprovalRow | None:
+        """Recover one pending approval row from canonical events if projection rows are missing."""
+        if not isinstance(governance_call_id, str) or not governance_call_id:
+            return None
+
+        snapshot = self.snapshot()
+        events = snapshot.get("events", [])
+        if not isinstance(events, list):
+            return None
+
+        observed_event: dict[str, Any] | None = None
+        approval_events: list[dict[str, Any]] = []
+        suspension_by_approval_id: dict[str, dict[str, Any]] = {}
+        resolved_approval_ids: set[str] = set()
+
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            subject = event.get("subject")
+            subject_data = subject if isinstance(subject, dict) else {}
+            if subject_data.get("governanceCallId") != governance_call_id:
+                continue
+
+            event_type = event.get("eventType")
+            if event_type == "governance.tool_call_observed.v1" and observed_event is None:
+                observed_event = event
+                continue
+            if event_type == "governance.approval_requested.v1":
+                approval_events.append(event)
+                continue
+            if event_type == "governance.execution_suspended.v1":
+                approval_request_id = subject_data.get("approvalRequestId")
+                if isinstance(approval_request_id, str) and approval_request_id:
+                    suspension_by_approval_id[approval_request_id] = event
+                continue
+            if event_type == "governance.approval_resolved.v1":
+                approval_request_id = subject_data.get("approvalRequestId")
+                if isinstance(approval_request_id, str) and approval_request_id:
+                    resolved_approval_ids.add(approval_request_id)
+
+        workflow_run = self.get_workflow_run(governance_call_id) or {}
+        projection = self._service().get_record("projection", governance_call_id) or workflow_run.get("projection")
+        observed_data = observed_event.get("data", {}) if isinstance(observed_event, dict) else {}
+        execution_context = observed_data.get("executionContext", {}) if isinstance(observed_data, dict) else {}
+        tool_data = observed_data.get("tool", {}) if isinstance(observed_data, dict) else {}
+
+        for approval_event in reversed(approval_events):
+            if not isinstance(approval_event, dict):
+                continue
+            approval_data = approval_event.get("data")
+            if not isinstance(approval_data, dict):
+                continue
+            approval_id = approval_data.get("approvalRequestId")
+            if not isinstance(approval_id, str) or not approval_id:
+                continue
+            if approval_id in resolved_approval_ids:
+                continue
+
+            decision_id = approval_data.get("decisionId")
+            requested_event_id = approval_event.get("eventId")
+            suspension_event = suspension_by_approval_id.get(approval_id)
+            suspension_data = suspension_event.get("data", {}) if isinstance(suspension_event, dict) else {}
+            suspension_id = suspension_data.get("suspensionId")
+            if not isinstance(decision_id, str) or not decision_id:
+                continue
+            if not isinstance(requested_event_id, str) or not requested_event_id:
+                continue
+            if not isinstance(suspension_id, str) or not suspension_id:
+                continue
+
+            requested_at = approval_event.get("recordedAt")
+            status = approval_data.get("status")
+            tool_call_id = execution_context.get("toolCallId")
+            tool_name = tool_data.get("name")
+            correlation_id = approval_event.get("correlationId")
+
+            approval_record: ApprovalRow = {
+                "approvalRequestId": approval_id,
+                "governanceCallId": governance_call_id,
+                "decisionId": decision_id,
+                "requestedEventId": requested_event_id,
+                "suspensionId": suspension_id,
+                "status": status if isinstance(status, str) and status else "pending",
+                "requestedAt": requested_at if isinstance(requested_at, str) and requested_at else "",
+                "projection": dict(approval_data),
+                "toolCallId": tool_call_id if isinstance(tool_call_id, str) and tool_call_id else None,
+                "sessionId": correlation_id if isinstance(correlation_id, str) and correlation_id else None,
+                "toolName": tool_name if isinstance(tool_name, str) and tool_name else None,
+            }
+
+            if isinstance(workflow_run.get("runId"), str):
+                approval_record["workflowRunId"] = workflow_run["runId"]
+            if isinstance(workflow_run.get("workflowId"), str):
+                approval_record["workflowId"] = workflow_run["workflowId"]
+            if isinstance(workflow_run.get("conversationId"), str):
+                approval_record["runtimeConversationId"] = workflow_run["conversationId"]
+            if isinstance(workflow_run.get("turnNodeId"), str):
+                approval_record["runtimeTurnNodeId"] = workflow_run["turnNodeId"]
+            if isinstance(workflow_run.get("suspendedNodeId"), str):
+                approval_record["suspendedNodeId"] = workflow_run["suspendedNodeId"]
+            if isinstance(workflow_run.get("suspendedTokenId"), str):
+                approval_record["suspendedTokenId"] = workflow_run["suspendedTokenId"]
+            if isinstance(projection, dict):
+                approval_record["runtimeProjection"] = dict(projection)
+
+            rebuilt = self._service().upsert_approval_record(approval_id, approval_record)
+            return dict(rebuilt)
+
         return None
 
     def snapshot(self) -> DebugStateSnapshot:

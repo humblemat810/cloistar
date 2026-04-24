@@ -6,7 +6,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Query
 
 from .domain.governance_append import append_approval_resolution, append_event, register_approval_request
 from .domain.governance_models import ApprovalRuntimeAttachmentRow
@@ -370,6 +370,12 @@ def _gateway_approval_resolved(kind: str, payload: dict) -> dict:
         )
         if approval is not None:
             bridge_approval_id = approval.get("approvalRequestId")
+    if approval is None:
+        gateway_approval_id = gateway_record.get("gatewayApprovalId")
+        if isinstance(gateway_approval_id, str) and gateway_approval_id:
+            approval = store.find_approval_for_gateway_approval_id(gateway_approval_id)
+            if approval is not None:
+                bridge_approval_id = approval.get("approvalRequestId")
     if isinstance(bridge_approval_id, str) and bridge_approval_id and resolution is not None:
         approval = approval or store.get_approval(bridge_approval_id)
         if approval is not None and approval.get("status") == "pending":
@@ -416,7 +422,13 @@ def kg_node_get(inp: NodeGetIn) -> dict:
 
 
 @app.post("/kg/node/delete")
-def kg_node_delete(node_id: str = Body(..., embed=True)) -> dict:
+def kg_node_delete(
+    node_id_body: str | None = Body(default=None, embed=True, alias="node_id"),
+    node_id_query: str | None = Query(default=None, alias="node_id"),
+) -> dict:
+    node_id = node_id_body or node_id_query
+    if not node_id:
+        raise HTTPException(status_code=422, detail="node_id is required")
     eng = get_governance_runtime_host().conversation_engine
     ok = eng.tombstone_node(node_id)
     return {"ok": ok}
@@ -465,7 +477,13 @@ def kg_edge_get(inp: EdgeGetIn) -> dict:
 
 
 @app.post("/kg/edge/delete")
-def kg_edge_delete(edge_id: str = Body(..., embed=True)) -> dict:
+def kg_edge_delete(
+    edge_id_body: str | None = Body(default=None, embed=True, alias="edge_id"),
+    edge_id_query: str | None = Query(default=None, alias="edge_id"),
+) -> dict:
+    edge_id = edge_id_body or edge_id_query
+    if not edge_id:
+        raise HTTPException(status_code=422, detail="edge_id is required")
     eng = get_governance_runtime_host().conversation_engine
     ok = eng.tombstone_edge(edge_id)
     return {"ok": ok}

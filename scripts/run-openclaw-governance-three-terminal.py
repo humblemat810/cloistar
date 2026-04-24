@@ -63,10 +63,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    # When executed as a script, sys.path[0] points to scripts/, not repo root.
+    sys.path.insert(0, str(ROOT_DIR))
+
 from bridge.app.llm_models import LlmApprovalDecisionContext
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
 HELPER_PATH = ROOT_DIR / "scripts" / "run-openclaw-gateway-governance-e2e.sh"
 OPENCLAW_ENTRY = ROOT_DIR / "openclaw" / "openclaw.mjs"
 NODE_BIN = Path("/home/azureuser/.nvm/versions/node/v22.22.2/bin/node")
@@ -305,10 +309,25 @@ def collect_session_summary(state: dict[str, Any], session_id: str) -> dict[str,
             governance_call_ids.add(event.get("subject", {}).get("governanceCallId"))
     governance_call_ids.discard(None)
 
+    session_approval_ids = set()
+    for event in state.get("events", []):
+        subject = event.get("subject", {}) or {}
+        approval_request_id = subject.get("approvalRequestId")
+        if not approval_request_id:
+            continue
+        if subject.get("governanceCallId") in governance_call_ids:
+            session_approval_ids.add(approval_request_id)
+            continue
+        execution_context = (event.get("data", {}) or {}).get("executionContext", {})
+        if execution_context.get("sessionId") == session_id:
+            session_approval_ids.add(approval_request_id)
+
     approvals = {
         approval_id: row
         for approval_id, row in state.get("approvals", {}).items()
         if row.get("toolCallId") in tool_call_ids
+        or approval_id in session_approval_ids
+        or row.get("approvalRequestId") in session_approval_ids
     }
 
     events = [
@@ -346,6 +365,24 @@ def collect_session_summary(state: dict[str, Any], session_id: str) -> dict[str,
     }
 
 
+def _extract_last_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    last_obj: dict[str, Any] | None = None
+    for idx, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            candidate, consumed = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(candidate, dict):
+            continue
+        if not text[idx + consumed :].strip():
+            return candidate
+        last_obj = candidate
+    return last_obj
+
+
 def summarize_agent_output(stdout_text: str) -> dict[str, Any] | None:
     text = stdout_text.strip()
     if not text:
@@ -353,22 +390,36 @@ def summarize_agent_output(stdout_text: str) -> dict[str, Any] | None:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
+        parsed = _extract_last_json_object(text)
+        if parsed is not None:
+            return parsed
         return {"raw": text}
+
+
+def _payload_texts_from_agent_output(payload: dict[str, Any]) -> list[str]:
+    payloads: list[Any] = []
+    result = payload.get("result")
+    if isinstance(result, dict):
+        payloads.extend((result.get("payloads") or []))
+    payloads.extend((payload.get("payloads") or []))
+    texts: list[str] = []
+    for item in payloads:
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            texts.append(item["text"])
+    return texts
 
 
 def extract_agent_output_text(stdout_text: str) -> str:
     payload = summarize_agent_output(stdout_text)
     if not isinstance(payload, dict):
         return stdout_text.strip()
-    result = payload.get("result")
-    if not isinstance(result, dict):
-        raw = payload.get("raw")
-        return raw if isinstance(raw, str) else stdout_text.strip()
-    parts = []
-    for item in result.get("payloads") or []:
-        if isinstance(item, dict) and isinstance(item.get("text"), str):
-            parts.append(item["text"])
-    return "\n".join(parts).strip()
+    parts = _payload_texts_from_agent_output(payload)
+    if parts:
+        return "\n".join(parts).strip()
+    raw = payload.get("raw")
+    if isinstance(raw, str):
+        return raw
+    return stdout_text.strip()
 
 
 def run_llm_approval_decision(
@@ -475,12 +526,12 @@ def evaluate_case_success(
     workflow_runs = list(summary.get("workflowRuns", {}).values())
     approvals = list(summary.get("approvals", {}).values())
     agent_output = summary.get("agentOutput") or {}
-    payload_texts = [
-        payload.get("text", "")
-        for payload in (((agent_output.get("result") or {}).get("payloads")) or [])
-        if isinstance(payload, dict)
-    ]
+    payload_texts = _payload_texts_from_agent_output(agent_output) if isinstance(agent_output, dict) else []
     combined_output = "\n".join(payload_texts)
+    if not combined_output and isinstance(agent_output, dict):
+        raw = agent_output.get("raw")
+        if isinstance(raw, str):
+            combined_output = raw
 
     if demo_case == "allow":
         if "governance.tool_call_completed.v1" not in event_types:
@@ -612,13 +663,41 @@ def role_approver(args: argparse.Namespace) -> int:
         }
         session_tool_call_ids.discard(None)
 
-        for approval_row in state.get("approvals", {}).values():
+        session_governance_call_ids = set()
+        for event in state.get("events", []):
+            if event.get("eventType") != "governance.tool_call_observed.v1":
+                continue
+            execution_context = (event.get("data", {}) or {}).get("executionContext", {})
+            if execution_context.get("sessionId") == session_id:
+                session_governance_call_ids.add(event.get("subject", {}).get("governanceCallId"))
+        session_governance_call_ids.discard(None)
+
+        session_approval_ids = set()
+        for event in state.get("events", []):
+            subject = event.get("subject", {}) or {}
+            approval_request_id = subject.get("approvalRequestId")
+            if not approval_request_id:
+                continue
+            if subject.get("governanceCallId") in session_governance_call_ids:
+                session_approval_ids.add(approval_request_id)
+                continue
+            execution_context = (event.get("data", {}) or {}).get("executionContext", {})
+            if execution_context.get("sessionId") == session_id:
+                session_approval_ids.add(approval_request_id)
+
+        for approval_row_id, approval_row in state.get("approvals", {}).items():
             gateway_approval_id = approval_row.get("gatewayApprovalId")
             tool_call_id = approval_row.get("toolCallId")
+            approval_request_id = approval_row.get("approvalRequestId") or approval_row_id
+            belongs_to_session = (
+                tool_call_id in session_tool_call_ids
+                or approval_request_id in session_approval_ids
+                or approval_row.get("sessionId") == session_id
+            )
             if (
                 approval_row.get("status") == "pending"
                 and gateway_approval_id
-                and tool_call_id in session_tool_call_ids
+                and belongs_to_session
                 and gateway_approval_id not in seen_plugin_ids
             ):
                 decision = choose_approval_decision(
@@ -745,6 +824,8 @@ def terminate_process(process: subprocess.Popen[str], label: str) -> None:
 def parent_main(args: argparse.Namespace) -> int:
     helper_proc: subprocess.Popen[str] | None = None
     helper_info: HelperInfo | None = None
+    launcher_python = str(VENV_PYTHON if VENV_PYTHON.exists() else Path(sys.executable))
+    launcher_prefix = [launcher_python, str(__file__)]
 
     if args.use_existing_stack:
         helper_info = HelperInfo(
@@ -758,11 +839,11 @@ def parent_main(args: argparse.Namespace) -> int:
         )
         poll_health(helper_info.bridge_url, timeout_s=min(args.startup_timeout, 30.0))
     else:
-        helper_args = [str(__file__), "--role", "helper"]
+        helper_args = [*launcher_prefix, "--role", "helper"]
         if args.stable_run_dir:
             helper_args.append("--stable-run-dir")
         else:
-            helper_args.extend(["--run-dir", str(args.run_dir)])
+            helper_args.extend(["--no-stable-run-dir", "--run-dir", str(args.run_dir)])
         helper_args.extend(["--ollama-model", args.ollama_model])
 
         helper_env = os.environ.copy()
@@ -802,7 +883,7 @@ def parent_main(args: argparse.Namespace) -> int:
         proof_text = proof_path.read_text().strip() if proof_path.exists() else None
 
         agent_args = [
-            str(__file__),
+            *launcher_prefix,
             "--role",
             "agent",
             "--run-dir",
@@ -830,7 +911,7 @@ def parent_main(args: argparse.Namespace) -> int:
 
         if demo_case == "approval":
             approver_args = [
-                str(__file__),
+                *launcher_prefix,
                 "--role",
                 "approver",
                 "--run-dir",
